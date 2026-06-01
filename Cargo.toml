@@ -1,0 +1,35 @@
+[package]
+name = "grindr"
+# `<lib version>+<emulated Grindr app/API version>`. The build-metadata segment
+# after `+` is informational (ignored by Cargo's version resolution) and is kept
+# in lockstep with `APP_VERSION` in `src/headers.rs`.
+version = "0.1.0+26.9.1.163471"
+edition = "2021"
+rust-version = "1.80"
+description = "Unofficial async Rust client for the Grindr API"
+homepage = "https://git.opengrind.org/open-grind/grindr.rs"
+repository = "https://git.opengrind.org/open-grind/grindr.rs"
+readme = "README.md"
+license = "MIT"
+keywords = ["grindr", "api", "client"]
+categories = ["api-bindings"]
+exclude = [".gitignore", ".vscode"]
+
+[dependencies]
+wreq = { version = "5.3", features = ["gzip", "json", "websocket"] }
+tokio = { version = "1", features = ["sync", "time", "rt", "rt-multi-thread", "macros"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+jsonwebtoken = "10"
+rand = "0.10"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+sha2 = "0.10"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

@@ -1,13 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-const MAX_ANDROID_VERSION: u8 = 16;
-
 struct DeviceProfile {
     manufacturer: &'static str,
     device_model: &'static str,
     screen_resolution: &'static str,
     total_ram: &'static str,
     min_android: u8,
+    max_android: u8,
 }
 
 const DEVICE_PROFILES: &[DeviceProfile] = &[
@@ -18,6 +17,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2400x1080",
         total_ram: "8026152960",
         min_android: 12,
+        max_android: 15,
     },
     DeviceProfile {
         manufacturer: "Google",
@@ -25,6 +25,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "3120x1440",
         total_ram: "12017676288",
         min_android: 12,
+        max_android: 15,
     },
     DeviceProfile {
         manufacturer: "Google",
@@ -32,6 +33,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2400x1080",
         total_ram: "5938152960",
         min_android: 12,
+        max_android: 15,
     },
     DeviceProfile {
         manufacturer: "Google",
@@ -39,6 +41,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2400x1080",
         total_ram: "8026152960",
         min_android: 13,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "Google",
@@ -46,6 +49,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "3120x1440",
         total_ram: "12017676288",
         min_android: 13,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "Google",
@@ -53,6 +57,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2400x1080",
         total_ram: "8026152960",
         min_android: 13,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "Google",
@@ -60,6 +65,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2400x1080",
         total_ram: "8026152960",
         min_android: 14,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "Google",
@@ -67,6 +73,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2992x1344",
         total_ram: "12017676288",
         min_android: 14,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "Google",
@@ -74,6 +81,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2400x1080",
         total_ram: "8026152960",
         min_android: 14,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "Google",
@@ -81,6 +89,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2424x1080",
         total_ram: "12017676288",
         min_android: 14,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "Google",
@@ -88,6 +97,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2856x1280",
         total_ram: "16065654784",
         min_android: 14,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "Google",
@@ -95,6 +105,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2992x1344",
         total_ram: "16065654784",
         min_android: 14,
+        max_android: 16,
     },
     // Samsung
     DeviceProfile {
@@ -103,6 +114,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2340x1080",
         total_ram: "8026152960",
         min_android: 12,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "samsung",
@@ -110,6 +122,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2340x1080",
         total_ram: "8026152960",
         min_android: 12,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "samsung",
@@ -117,6 +130,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "3088x1440",
         total_ram: "12017676288",
         min_android: 12,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "samsung",
@@ -124,6 +138,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2340x1080",
         total_ram: "8026152960",
         min_android: 13,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "samsung",
@@ -131,6 +146,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2340x1080",
         total_ram: "8026152960",
         min_android: 13,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "samsung",
@@ -138,6 +154,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "3088x1440",
         total_ram: "12017676288",
         min_android: 13,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "samsung",
@@ -145,6 +162,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2340x1080",
         total_ram: "8026152960",
         min_android: 14,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "samsung",
@@ -152,6 +170,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2340x1080",
         total_ram: "12017676288",
         min_android: 14,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "samsung",
@@ -159,6 +178,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "3120x1440",
         total_ram: "12017676288",
         min_android: 14,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "samsung",
@@ -166,6 +186,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2340x1080",
         total_ram: "8026152960",
         min_android: 13,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "samsung",
@@ -173,6 +194,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2340x1080",
         total_ram: "8026152960",
         min_android: 13,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "samsung",
@@ -180,6 +202,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2408x1080",
         total_ram: "3852152832",
         min_android: 13,
+        max_android: 15,
     },
     DeviceProfile {
         manufacturer: "samsung",
@@ -187,6 +210,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2640x1080",
         total_ram: "8026152960",
         min_android: 13,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "samsung",
@@ -194,6 +218,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2176x1812",
         total_ram: "12017676288",
         min_android: 13,
+        max_android: 16,
     },
     // Xiaomi / Redmi / POCO
     DeviceProfile {
@@ -202,6 +227,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2400x1080",
         total_ram: "8026152960",
         min_android: 12,
+        max_android: 15,
     },
     DeviceProfile {
         manufacturer: "Xiaomi",
@@ -209,6 +235,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2400x1080",
         total_ram: "8026152960",
         min_android: 13,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "Xiaomi",
@@ -216,6 +243,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2712x1220",
         total_ram: "8026152960",
         min_android: 13,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "Xiaomi",
@@ -223,13 +251,15 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2670x1200",
         total_ram: "12017676288",
         min_android: 14,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "Xiaomi",
         device_model: "23021RAA2Y",
         screen_resolution: "2400x1080",
         total_ram: "3852152832",
-        min_android: 12,
+        min_android: 13,
+        max_android: 15,
     },
     DeviceProfile {
         manufacturer: "Xiaomi",
@@ -237,6 +267,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2712x1220",
         total_ram: "8026152960",
         min_android: 13,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "Xiaomi",
@@ -244,6 +275,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2400x1080",
         total_ram: "8026152960",
         min_android: 13,
+        max_android: 16,
     },
     // OnePlus
     DeviceProfile {
@@ -252,6 +284,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "3216x1440",
         total_ram: "8026152960",
         min_android: 12,
+        max_android: 15,
     },
     DeviceProfile {
         manufacturer: "OnePlus",
@@ -259,6 +292,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "3216x1440",
         total_ram: "8026152960",
         min_android: 13,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "OnePlus",
@@ -266,6 +300,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "3168x1440",
         total_ram: "12017676288",
         min_android: 14,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "OnePlus",
@@ -273,6 +308,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2772x1240",
         total_ram: "8026152960",
         min_android: 13,
+        max_android: 16,
     },
     // Motorola
     DeviceProfile {
@@ -281,6 +317,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2400x1080",
         total_ram: "8026152960",
         min_android: 13,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "motorola",
@@ -288,21 +325,7 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2400x1080",
         total_ram: "8026152960",
         min_android: 13,
-    },
-    // Sony
-    DeviceProfile {
-        manufacturer: "Sony",
-        device_model: "XQ-DQ54",
-        screen_resolution: "3840x1644",
-        total_ram: "12017676288",
-        min_android: 13,
-    },
-    DeviceProfile {
-        manufacturer: "Sony",
-        device_model: "XQ-DE54",
-        screen_resolution: "2520x1080",
-        total_ram: "8026152960",
-        min_android: 13,
+        max_android: 15,
     },
     // Nothing
     DeviceProfile {
@@ -311,21 +334,15 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
         screen_resolution: "2412x1080",
         total_ram: "12017676288",
         min_android: 13,
+        max_android: 16,
     },
     DeviceProfile {
         manufacturer: "Nothing",
         device_model: "A142",
-        screen_resolution: "2412x1084",
+        screen_resolution: "2412x1080",
         total_ram: "8026152960",
         min_android: 14,
-    },
-    // Asus
-    DeviceProfile {
-        manufacturer: "asus",
-        device_model: "ASUS_AI2205",
-        screen_resolution: "2448x1080",
-        total_ram: "12017676288",
-        min_android: 13,
+        max_android: 16,
     },
 ];
 
@@ -400,7 +417,7 @@ impl DeviceInfo {
         let profile = &DEVICE_PROFILES[rand::random_range(0..DEVICE_PROFILES.len())];
         let timezone = SAFE_TIMEZONES[rand::random_range(0..SAFE_TIMEZONES.len())];
         let device_id = format!("{:016x}", rand::random::<u64>());
-        let android_version = rand::random_range(profile.min_android..=MAX_ANDROID_VERSION);
+        let android_version = rand::random_range(profile.min_android..=profile.max_android);
 
         Self {
             device_type: 2,
@@ -434,5 +451,18 @@ mod tests {
         assert!(d.os.starts_with("Android "));
         assert_eq!(d.device_id.len(), 16);
         assert!(!d.device_model.is_empty());
+    }
+
+    #[test]
+    fn android_version_range_is_sane() {
+        for p in DEVICE_PROFILES {
+            assert!(
+                p.min_android <= p.max_android,
+                "{} has min_android ({}) > max_android ({})",
+                p.device_model,
+                p.min_android,
+                p.max_android,
+            );
+        }
     }
 }

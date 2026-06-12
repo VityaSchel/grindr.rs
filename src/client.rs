@@ -156,13 +156,16 @@ struct WsSpawn {
 /// Cheap to [`Clone`] — clones share the connection pool, session, and the
 /// background websocket task. Build one with [`new`](Self::new), log in with
 /// [`login`](Self::login) or [`google_sign_in`](Self::google_sign_in), then make
-/// requests with [`request_authenticated_raw`](Self::request_authenticated_raw)
-/// and read events from [`ws_receiver`](Self::ws_receiver).
+/// requests with [`request_authenticated_raw`](Self::request_authenticated_raw).
 ///
-/// The client owns no Tokio runtime. The background websocket task is spawned on
-/// the caller's runtime on the first authenticated call (or an explicit
-/// [`connect`](Self::connect)), so [`new`](Self::new) can be called from
-/// non-async code.
+/// The realtime websocket is opt-in: REST works on its own and never opens a
+/// socket. Call [`connect`](Self::connect) when you want realtime, then read
+/// events from [`ws_receiver`](Self::ws_receiver). The background task is shared
+/// across clones and started at most once.
+///
+/// The client owns no Tokio runtime. [`new`](Self::new) is sync and can be
+/// called from non-async code; the websocket task attaches to the caller's
+/// runtime the first time [`connect`](Self::connect) is called.
 #[derive(Clone)]
 pub struct GrindrClient {
     inner: Arc<InnerClient>,
@@ -181,9 +184,8 @@ impl GrindrClient {
     /// [`Session`].
     ///
     /// Pass `None` to start logged out, or a saved session to resume without
-    /// logging in again. This is sync and needs no runtime — the websocket
-    /// starts on the first authenticated call (e.g. [`login`](Self::login)) or
-    /// [`connect`](Self::connect), and connects once there's a session.
+    /// logging in again. This is sync and needs no runtime, and it never opens
+    /// the websocket — call [`connect`](Self::connect) for that.
     pub fn new(device: DeviceInfo, session: Option<Session>) -> Result<Self, GrindrError> {
         let fingerprint = build_fingerprint(device)?;
 
@@ -225,8 +227,8 @@ impl GrindrClient {
     /// Spawns the background websocket task once, on the current Tokio
     /// runtime. Cheap to call repeatedly, only the first call does any work.
     ///
-    /// Must be called from within an async context (every async method in here),
-    /// so the task attaches to the caller's runtime.
+    /// Only reached through [`connect`](Self::connect), so it always runs inside
+    /// an async context and the task attaches to the caller's runtime.
     fn ensure_ws_task(&self) {
         self.ws_started.call_once(|| {
             // Only this closure runs (once), so the parts are always present.
@@ -272,19 +274,21 @@ impl GrindrClient {
         self.ws_cmd_tx.clone()
     }
 
-    /// Starts the background websocket task if it isn't running yet.
+    /// Opts in to the realtime websocket, starting the shared background task if
+    /// it isn't running yet.
     ///
-    /// It also starts on the first authenticated call ([`login`](Self::login),
-    /// [`request_authenticated_raw`](Self::request_authenticated_raw)), so you
-    /// only need this when resuming a saved [`Session`] and want the connection
-    /// up before making a request. Calling it more than once does nothing.
+    /// The websocket is never started automatically. REST calls like
+    /// [`request_authenticated_raw`](Self::request_authenticated_raw) work
+    /// without it. Call this once (from any clone) when you want realtime events
+    /// from [`ws_receiver`](Self::ws_receiver); the task connects as soon as
+    /// there's a session and reconnects on its own. Calling it again does
+    /// nothing.
     pub async fn connect(&self) {
         self.ensure_ws_task();
     }
 
     /// Logs in with email and password and stores the session.
     pub async fn login(&self, email: &str, password: &str) -> Result<LoginResult, GrindrError> {
-        self.ensure_ws_task();
         crate::auth::login_email(&self.inner, &self.auth, email, password).await
     }
 
@@ -293,7 +297,6 @@ impl GrindrClient {
         &self,
         google_access_token: &str,
     ) -> Result<LoginResult, GrindrError> {
-        self.ensure_ws_task();
         crate::auth::google_sign_in(&self.inner, &self.auth, google_access_token).await
     }
 
@@ -302,7 +305,6 @@ impl GrindrClient {
     /// This happens automatically before the token expires, so you rarely need
     /// to call it yourself.
     pub async fn refresh_token(&self) -> Result<LoginResult, GrindrError> {
-        self.ensure_ws_task();
         crate::auth::refresh_token(&self.inner, &self.auth).await
     }
 
@@ -328,7 +330,6 @@ impl GrindrClient {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<RawResponse, GrindrError> {
-        self.ensure_ws_task();
         self.inner
             .request_authenticated_raw(&self.auth, method, path, body)
             .await
@@ -369,20 +370,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ws_task_spawns_on_first_async_call() {
-        // The key property: the lazy spawn attaches to the caller's runtime on
-        // the first async call, without the "there is no reactor running" panic.
+    async fn rest_calls_do_not_start_the_ws_task() {
         let client = GrindrClient::new(DeviceInfo::generate(), None).unwrap();
 
-        // No session => an auth error is returned before any network I/O, but
-        // ensure_ws_task() has already spawned the background task by then.
         let err = client
             .request_authenticated_raw(Method::GET, "/v3/me/profile", None)
             .await
             .unwrap_err();
 
         assert!(matches!(err, GrindrError::Auth(_)));
-        assert!(client.ws_started.is_completed());
+        assert!(!client.ws_started.is_completed());
     }
 
     #[tokio::test]

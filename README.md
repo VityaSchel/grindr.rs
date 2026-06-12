@@ -78,7 +78,7 @@ tokio::spawn(async move {
 
 ## WebSocket
 
-The client maintains a background WebSocket once a session exists. Subscribe to events and send commands:
+The realtime WebSocket is opt-in, REST works without it. Call `client.connect().await` once to start the shared background socket, which then connects as soon as a session exists. Subscribe to events and send commands:
 
 ```rust
 use grindr::WsCommand;
@@ -103,7 +103,7 @@ client
     .ok();
 ```
 
-The async background task starts on the first authenticated call. When you resume a stored session and want the socket up *before* issuing any request, call `client.connect().await` explicitly. Watch the connection with `GrindrClient::connection_state`, and observe failed background token refreshes via `GrindrClient::auth_event_receiver`.
+The background task is never started for you. `client.connect().await` is the only thing that starts it, and it's idempotent and shared across clones. Until you call it, no socket is opened and `ws_receiver()` produces nothing. Watch the connection with `GrindrClient::connection_state`, and observe failed background token refreshes via `GrindrClient::auth_event_receiver`.
 
 ## API reference
 
@@ -126,7 +126,7 @@ Full generated docs: <https://docs.rs/grindr>.
 | `connection_state() -> watch::Receiver<WsConnectionState>`             | Watch the websocket connection state                                           |
 | `ws_receiver() -> broadcast::Receiver<WsEvent>`                        | Subscribe to websocket events                                                  |
 | `ws_sender() -> mpsc::Sender<WsCommand>`                               | Get websocket sender for commands                                              |
-| `connect()`                                                            | Start the background websocket now (e.g. on a resumed session)                 |
+| `connect()`                                                            | Opt in to the realtime websocket and start the shared background task          |
 | `auth_event_receiver() -> broadcast::Receiver<AuthEvent>`              | Subscribe to background token refresh failures                                 |
 
 ### Types

@@ -11,7 +11,8 @@
 //! # Overview
 //!
 //! - [`GrindrClient`] — the main entry point. Cheap to clone, refreshes the
-//!   token on its own, and runs the websocket in the background.
+//!   token on its own, and runs the realtime websocket in the background once
+//!   you opt in with [`GrindrClient::connect`].
 //! - [`DeviceInfo`] — a fake but believable device identity.
 //! - [`Session`] — credentials you can save and resume from.
 //! - [`RawResponse`] — the status and body from a request.

@@ -105,33 +105,53 @@ impl InnerClient {
         body: Option<serde_json::Value>,
     ) -> Result<RawResponse, GrindrError> {
         validate_path(path)?;
-        let authorization = crate::auth::authorization_header(self, auth)
-            .await
-            .ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))?;
 
-        let fp = self.fingerprint().await;
-        let headers = GrindrHeaders::build(
-            &fp.device,
-            &fp.user_agent,
-            Some(&authorization),
-            Some("[FREE]"),
-        )?;
+        let mut retried = false;
+        loop {
+            let authorization = crate::auth::authorization_header(self, auth)
+                .await
+                .ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))?;
+            let session_id = auth
+                .session
+                .read()
+                .await
+                .as_ref()
+                .map(|s| s.session_id.clone());
 
-        let mut req = Self::apply_headers(
-            fp.http.request(method, format!("{BASE_URL}{path}")),
-            &headers.items,
-        );
-        if let Some(b) = body {
-            req = req.json(&b);
+            let fp = self.fingerprint().await;
+            let headers = GrindrHeaders::build(
+                &fp.device,
+                &fp.user_agent,
+                Some(&authorization),
+                Some("[FREE]"),
+            )?;
+
+            let mut req = Self::apply_headers(
+                fp.http.request(method.clone(), format!("{BASE_URL}{path}")),
+                &headers.items,
+            );
+            if let Some(b) = &body {
+                req = req.json(b);
+            }
+
+            let resp = req.send().await?;
+            let status = resp.status().as_u16();
+            let body_bytes = resp.bytes().await?.to_vec();
+
+            if status == 401 && !retried {
+                retried = true;
+                if let Some(stale) = session_id {
+                    if crate::auth::refresh_after_unauthorized(self, auth, &stale).await {
+                        continue;
+                    }
+                }
+            }
+
+            return Ok(RawResponse {
+                status,
+                body: body_bytes,
+            });
         }
-
-        let resp = req.send().await?;
-        let status = resp.status().as_u16();
-        let body_bytes = resp.bytes().await?.to_vec();
-        Ok(RawResponse {
-            status,
-            body: body_bytes,
-        })
     }
 }
 

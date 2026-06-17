@@ -320,6 +320,39 @@ pub(crate) async fn refresh_token(
     Ok(LoginResult { profile_id })
 }
 
+/// Refresh after an authenticated request returned `401`.
+pub(crate) async fn refresh_after_unauthorized(
+    inner: &InnerClient,
+    auth: &AuthState,
+    rejected_session_id: &str,
+) -> bool {
+    let _guard = auth.refresh_lock.lock().await;
+
+    match auth.session.read().await.as_ref() {
+        None => return false,
+        Some(s) if s.session_id != rejected_session_id => return true,
+        Some(_) => {}
+    }
+
+    match refresh_token(inner, auth).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!("reactive token refresh failed: {e}");
+            let unauthorized = matches!(e, GrindrError::Unauthorized { .. });
+            if unauthorized {
+                auth.clear_session().await;
+            }
+            if unauthorized || auth.session.read().await.is_some() {
+                let _ = auth.auth_event_tx.send(AuthEvent {
+                    message: e.to_string(),
+                    unauthorized,
+                });
+            }
+            false
+        }
+    }
+}
+
 pub(crate) async fn recaptcha_first_party_enabled(
     inner: &InnerClient,
 ) -> Result<bool, GrindrError> {

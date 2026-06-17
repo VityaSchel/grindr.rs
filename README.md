@@ -1,5 +1,7 @@
 # grindr.rs
 
+<img src="./contrib/logo.svg" align="right" />
+
 Unofficial async Rust client for the Grindr API, powering [Open Grind](https://opengrind.org) client.
 
 > [!Important]

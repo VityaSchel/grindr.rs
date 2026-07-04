@@ -538,8 +538,9 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "grindr"
-version = "0.3.0+26.9.1.163471"
+version = "0.3.1+26.9.1.163471"
 dependencies = [
+ "bytes",
  "futures-util",
  "jsonwebtoken",
  "rand 0.10.1",

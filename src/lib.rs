@@ -62,6 +62,9 @@ pub use headers::{build_device_info_header, build_user_agent, GrindrHeaders, APP
 pub use rest::RawResponse;
 pub use ws::{WsCommand, WsConnectionState, WsEvent};
 
+/// Request body bytes, re-exported from [`bytes`] for use with
+/// [`GrindrClient::request_authenticated_bytes`].
+pub use bytes::Bytes;
 /// HTTP method, re-exported from [`wreq`] for use with
 /// [`GrindrClient::request_authenticated_raw`].
 pub use wreq::Method;

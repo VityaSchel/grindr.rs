@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
 use serde::{de::DeserializeOwned, Serialize};
 use wreq::{Client, Method, RequestBuilder};
 
@@ -29,6 +30,8 @@ fn validate_path(path: &str) -> Result<(), GrindrError> {
 ///
 /// Returned by
 /// [`GrindrClient::request_authenticated_raw`](crate::GrindrClient::request_authenticated_raw)
+/// and
+/// [`GrindrClient::request_authenticated_bytes`](crate::GrindrClient::request_authenticated_bytes)
 /// so callers can deserialize the body into whatever type the endpoint returns.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RawResponse {
@@ -45,6 +48,15 @@ pub struct Fingerprint {
     pub ws_http: Client,
     pub device: DeviceInfo,
     pub user_agent: String,
+}
+
+/// Payload of an authenticated request.
+///
+/// Kept by reference across the internal 401-refresh retry, so the raw variant
+/// holds [`Bytes`] (cloning is a refcount bump, not a copy).
+pub(crate) enum RequestBody {
+    Json(serde_json::Value),
+    Raw { content_type: String, bytes: Bytes },
 }
 
 pub(crate) struct InnerClient {
@@ -97,12 +109,12 @@ impl InnerClient {
         resp.json::<TResp>().await.map_err(Into::into)
     }
 
-    pub async fn request_authenticated_raw(
+    pub async fn request_authenticated(
         &self,
         auth: &AuthState,
         method: Method,
         path: &str,
-        body: Option<serde_json::Value>,
+        body: Option<RequestBody>,
     ) -> Result<RawResponse, GrindrError> {
         validate_path(path)?;
 
@@ -130,8 +142,13 @@ impl InnerClient {
                 fp.http.request(method.clone(), format!("{BASE_URL}{path}")),
                 &headers.items,
             );
-            if let Some(b) = &body {
-                req = req.json(b);
+            match &body {
+                Some(RequestBody::Json(b)) => req = req.json(b),
+                Some(RequestBody::Raw {
+                    content_type,
+                    bytes,
+                }) => req = req.header("content-type", content_type).body(bytes.clone()),
+                None => {}
             }
 
             let resp = req.send().await?;
@@ -213,5 +230,49 @@ mod tests {
                 "expected {bad:?} to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn from_response_parses_api_code_and_message() {
+        let err = GrindrError::from_response(400, br#"{"code":4,"message":"Media not allowed"}"#);
+        assert!(
+            matches!(err, GrindrError::Api { code: 4, ref message } if message == "Media not allowed"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn from_response_maps_401_to_unauthorized() {
+        let err = GrindrError::from_response(401, b"{}");
+        assert!(matches!(err, GrindrError::Unauthorized { code: 401, .. }));
+    }
+
+    #[test]
+    fn from_response_falls_back_to_raw_body() {
+        let err = GrindrError::from_response(502, b"Bad Gateway");
+        assert!(
+            matches!(err, GrindrError::Api { code: 502, ref message } if message == "Bad Gateway"),
+            "got {err:?}"
+        );
+
+        let err = GrindrError::from_response(500, b"");
+        assert!(
+            matches!(err, GrindrError::Api { code: 500, ref message } if message == "unknown error"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn from_response_truncates_long_bodies_on_char_boundaries() {
+        // 3-byte chars with MAX_ERROR_BODY % 3 == 1 put the cut mid-character,
+        // so this only passes if the boundary backoff steps back a byte.
+        let body = "€".repeat(400);
+        let err = GrindrError::from_response(500, body.as_bytes());
+        let GrindrError::Api { message, .. } = err else {
+            panic!("expected Api error");
+        };
+        let prefix = message.strip_suffix("...").expect("truncation suffix");
+        assert_eq!(prefix.len(), MAX_ERROR_BODY - 1);
+        assert!(prefix.chars().all(|c| c == '€'));
     }
 }

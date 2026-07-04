@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex, Once};
 
+use bytes::Bytes;
 use tokio::sync::{broadcast, mpsc, watch, Notify};
 use wreq::{
     Client, EmulationProvider, Http2Config, Method, PseudoOrder, SettingsOrder, SslCurve,
@@ -10,7 +11,7 @@ use crate::auth::{AuthEvent, AuthState, LoginResult, Session};
 use crate::device::DeviceInfo;
 use crate::error::GrindrError;
 use crate::headers::build_user_agent;
-use crate::rest::{Fingerprint, InnerClient, RawResponse};
+use crate::rest::{Fingerprint, InnerClient, RawResponse, RequestBody};
 use crate::ws::{make_channels, WsChannels, WsCommand, WsConnectionState, WsEvent};
 
 /// References <https://opengrind.org/grindr-api/security-headers#cipher-suites>
@@ -331,7 +332,36 @@ impl GrindrClient {
         body: Option<serde_json::Value>,
     ) -> Result<RawResponse, GrindrError> {
         self.inner
-            .request_authenticated_raw(&self.auth, method, path, body)
+            .request_authenticated(&self.auth, method, path, body.map(RequestBody::Json))
+            .await
+    }
+
+    /// Like [`request_authenticated_raw`](Self::request_authenticated_raw), but
+    /// sends a raw binary body with the given `Content-Type` instead of JSON —
+    /// for endpoints like `POST /v5/chat/media/upload` that take the file bytes
+    /// as the body.
+    ///
+    /// `body` accepts anything convertible to [`Bytes`]; a `Vec<u8>` converts
+    /// without copying. Non-success statuses come back as a normal
+    /// [`RawResponse`]; map them with [`GrindrError::from_response`] to get the
+    /// same errors the crate's typed methods return.
+    pub async fn request_authenticated_bytes(
+        &self,
+        method: Method,
+        path: &str,
+        content_type: &str,
+        body: impl Into<Bytes>,
+    ) -> Result<RawResponse, GrindrError> {
+        self.inner
+            .request_authenticated(
+                &self.auth,
+                method,
+                path,
+                Some(RequestBody::Raw {
+                    content_type: content_type.to_owned(),
+                    bytes: body.into(),
+                }),
+            )
             .await
     }
 
@@ -380,6 +410,28 @@ mod tests {
 
         assert!(matches!(err, GrindrError::Auth(_)));
         assert!(!client.ws_started.is_completed());
+    }
+
+    #[tokio::test]
+    async fn bytes_requests_require_a_session_and_validate_the_path() {
+        let client = GrindrClient::new(DeviceInfo::generate(), None).unwrap();
+
+        let err = client
+            .request_authenticated_bytes(
+                Method::POST,
+                "/v5/chat/media/upload?takenOnGrindr=false",
+                "image/jpeg",
+                vec![0xFF, 0xD8],
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GrindrError::Auth(_)));
+
+        let err = client
+            .request_authenticated_bytes(Method::POST, "evil.com/x", "image/jpeg", Vec::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GrindrError::InvalidRequest(_)));
     }
 
     #[tokio::test]

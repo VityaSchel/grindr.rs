@@ -121,6 +121,7 @@ Full generated docs: <https://docs.rs/grindr>.
 | `refresh_token() -> Result<LoginResult>`                               | Force token refresh                                                            |
 | `logout()`                                                             | Clear the session and disconnect the websocket                                 |
 | `request_authenticated_raw(method, path, body) -> Result<RawResponse>` | Authenticated API call returning the raw status + body                         |
+| `request_authenticated_bytes(method, path, content_type, body) -> Result<RawResponse>` | Like `request_authenticated_raw`, but with a raw binary body (e.g. media uploads) |
 | `rotate_device(device) -> Result<DeviceInfo>`                          | Set the device identity in place, keeping the session; returns old device info |
 | `current_device() -> DeviceInfo`                                       | Get the device identity currently in use                                       |
 | `recaptcha_first_party_enabled() -> Result<bool>`                      | Check whether first-party reCAPTCHA is enabled                                 |
@@ -142,8 +143,9 @@ Full generated docs: <https://docs.rs/grindr>.
 - `WsEvent` — websocket event `{ event_type, payload }`
 - `WsConnectionState` — `Connected` / `Disconnected`
 - `AuthEvent` — `{ message, unauthorized }` from background refreshes
-- `GrindrError` — the crate error type (`Http`, `Auth`, `Api`, `Unauthorized`, `InvalidRequest`)
+- `GrindrError` — the crate error type (`Http`, `Auth`, `Api`, `Unauthorized`, `InvalidRequest`); `GrindrError::from_response(status, body)` maps a non-success `RawResponse` the same way the typed methods do
 - `Method` — re-exported `wreq::Method` for `request_authenticated_raw`
+- `Bytes` — re-exported `bytes::Bytes` for `request_authenticated_bytes`
 
 ### Low-level helpers
 

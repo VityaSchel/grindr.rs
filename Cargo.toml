@@ -3,7 +3,7 @@ name = "grindr"
 # `<lib version>+<emulated Grindr app/API version>`. The build-metadata segment
 # after `+` is informational (ignored by Cargo's version resolution) and is kept
 # in lockstep with `APP_VERSION` in `src/headers.rs`.
-version = "0.3.0+26.9.1.163471"
+version = "0.3.1+26.9.1.163471"
 edition = "2021"
 rust-version = "1.80"
 description = "Unofficial async Rust client for the Grindr API"
@@ -17,6 +17,7 @@ exclude = [".gitignore", ".vscode"]
 
 [dependencies]
 wreq = { version = "5.3", features = ["gzip", "json", "websocket"] }
+bytes = "1"
 tokio = { version = "1", features = ["sync", "time", "rt", "rt-multi-thread", "macros"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 serde = { version = "1", features = ["derive"] }

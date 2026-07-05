@@ -97,6 +97,14 @@ pub(crate) struct RefreshRequest {
     pub geohash: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThirdPartyRefreshRequest<'a> {
+    third_party_user_id: &'a str,
+    auth_token: &'a str,
+    geohash: Option<&'a str>,
+}
+
 #[derive(Debug, Deserialize)]
 struct JwtClaims {
     exp: u64,
@@ -276,45 +284,84 @@ pub(crate) async fn google_sign_in(
     let tp = parsed
         .authentication_response
         .ok_or_else(|| GrindrError::Auth("account not registered".to_owned()))?;
-    let claims = decode_session_jwt(&tp.session_id)?;
-    let display_email = tp
-        .third_party_user_id_to_show
-        .clone()
-        .unwrap_or_else(|| tp.third_party_user_id.clone());
+    let fallback_email = tp.third_party_user_id.clone();
+    let session = session_from_third_party(tp, fallback_email)?;
+    let profile_id = session.profile_id.clone();
+    auth.set_session(session).await;
+    Ok(LoginResult { profile_id })
+}
 
-    let session = Session {
-        email: display_email,
-        profile_id: tp.profile_id.clone(),
+fn session_from_third_party(
+    tp: ThirdPartySession,
+    fallback_email: String,
+) -> Result<Session, GrindrError> {
+    let claims = decode_session_jwt(&tp.session_id)?;
+    Ok(Session {
+        email: tp.third_party_user_id_to_show.unwrap_or(fallback_email),
+        profile_id: tp.profile_id,
         session_id: tp.session_id,
         auth_token: tp.auth_token,
         expires_at: claims.exp,
         kind: SessionKind::Google,
         third_party_user_id: Some(tp.third_party_user_id),
+    })
+}
+
+async fn refresh_third_party_session(
+    inner: &InnerClient,
+    third_party_user_id: &str,
+    auth_token: &str,
+    fallback_email: String,
+) -> Result<Session, GrindrError> {
+    let body = ThirdPartyRefreshRequest {
+        third_party_user_id,
+        auth_token,
+        geohash: None,
     };
-    let profile_id = session.profile_id.clone();
-    auth.set_session(session).await;
-    Ok(LoginResult { profile_id })
+    let parsed: ThirdPartyAuthResponse = inner
+        .request_no_auth(wreq::Method::POST, "/v8/sessions/thirdparty", Some(&body))
+        .await?;
+    let tp = parsed
+        .authentication_response
+        .ok_or_else(|| GrindrError::Auth("third-party session refresh rejected".to_owned()))?;
+    session_from_third_party(tp, fallback_email)
 }
 
 pub(crate) async fn refresh_token(
     inner: &InnerClient,
     auth: &AuthState,
 ) -> Result<LoginResult, GrindrError> {
-    let (email, auth_token) = {
+    let (kind, email, auth_token, third_party_user_id) = {
         let guard = auth.session.read().await;
         let s = guard
             .as_ref()
             .ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))?;
-        (s.email.clone(), s.auth_token.clone())
+        (
+            s.kind.clone(),
+            s.email.clone(),
+            s.auth_token.clone(),
+            s.third_party_user_id.clone(),
+        )
     };
 
-    let body = RefreshRequest {
-        email,
-        auth_token,
-        token: None,
-        geohash: None,
+    let session = match kind {
+        SessionKind::Email => {
+            let body = RefreshRequest {
+                email,
+                auth_token,
+                token: None,
+                geohash: None,
+            };
+            create_session(inner, &body, SessionKind::Email, None).await?
+        }
+        SessionKind::Google => {
+            let third_party_user_id = third_party_user_id.ok_or_else(|| {
+                GrindrError::Auth("google session missing third-party user id".to_owned())
+            })?;
+            refresh_third_party_session(inner, &third_party_user_id, &auth_token, email).await?
+        }
     };
-    let session = create_session(inner, &body, SessionKind::Email, None).await?;
+
     let profile_id = session.profile_id.clone();
     auth.set_session(session).await;
     Ok(LoginResult { profile_id })
@@ -400,4 +447,59 @@ pub(crate) async fn authorization_header(inner: &InnerClient, auth: &AuthState) 
         .await
         .as_ref()
         .map(|s| format!("Grindr3 {}", s.session_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Header {"alg":"HS256","typ":"JWT"} . payload {"exp":9999999999} . sig
+    const JWT: &str =
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjk5OTk5OTk5OTl9.sig";
+
+    fn third_party_session(show: Option<&str>) -> ThirdPartySession {
+        ThirdPartySession {
+            profile_id: "42".to_owned(),
+            session_id: JWT.to_owned(),
+            auth_token: "auth-tok".to_owned(),
+            third_party_user_id: "vendor-uid".to_owned(),
+            third_party_user_id_to_show: show.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn third_party_refresh_body_uses_grindr_wire_keys() {
+        let body = ThirdPartyRefreshRequest {
+            third_party_user_id: "vendor-uid",
+            auth_token: "auth-tok",
+            geohash: None,
+        };
+        let json: serde_json::Value = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["thirdPartyUserId"], "vendor-uid");
+        assert_eq!(json["authToken"], "auth-tok");
+        assert!(json.get("email").is_none());
+        assert!(json["geohash"].is_null());
+    }
+
+    #[test]
+    fn session_from_third_party_preserves_google_identity() {
+        let session = session_from_third_party(
+            third_party_session(Some("me@example.com")),
+            "fallback@example.com".to_owned(),
+        )
+        .unwrap();
+
+        assert_eq!(session.kind, SessionKind::Google);
+        assert_eq!(session.third_party_user_id.as_deref(), Some("vendor-uid"));
+        assert_eq!(session.auth_token, "auth-tok");
+        assert_eq!(session.email, "me@example.com");
+    }
+
+    #[test]
+    fn session_from_third_party_falls_back_when_no_display_id() {
+        let session =
+            session_from_third_party(third_party_session(None), "fallback@example.com".to_owned())
+                .unwrap();
+        assert_eq!(session.email, "fallback@example.com");
+    }
 }

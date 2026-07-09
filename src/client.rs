@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex, Once};
 
 use bytes::Bytes;
-use tokio::sync::{broadcast, mpsc, watch, Notify};
+use tokio::sync::{broadcast, mpsc, watch};
 use wreq::{
     Client, EmulationProvider, Http2Config, Method, PseudoOrder, SettingsOrder, SslCurve,
     TlsConfig, TlsVersion,
@@ -149,7 +149,6 @@ struct WsSpawn {
     auth: Arc<AuthState>,
     channels: WsChannels,
     cmd_rx: mpsc::Receiver<WsCommand>,
-    logout_notify: Arc<Notify>,
 }
 
 /// An async client for the Grindr API.
@@ -175,7 +174,6 @@ pub struct GrindrClient {
     ws_event_tx: broadcast::Sender<WsEvent>,
     ws_cmd_tx: mpsc::Sender<WsCommand>,
     ws_state_rx: watch::Receiver<WsConnectionState>,
-    logout_notify: Arc<Notify>,
     ws_started: Arc<Once>,
     ws_spawn: Arc<Mutex<Option<WsSpawn>>>,
 }
@@ -198,7 +196,6 @@ impl GrindrClient {
         let auth = Arc::new(auth_state);
 
         let (ws_channels, ws_handles) = make_channels();
-        let logout_notify = Arc::new(Notify::new());
 
         let ws_event_tx = ws_channels.event_tx.clone();
         let ws_cmd_tx = ws_handles.cmd_tx;
@@ -209,7 +206,6 @@ impl GrindrClient {
             auth: Arc::clone(&auth),
             channels: ws_channels,
             cmd_rx: ws_handles.cmd_rx,
-            logout_notify: Arc::clone(&logout_notify),
         };
 
         Ok(Self {
@@ -219,7 +215,6 @@ impl GrindrClient {
             ws_event_tx,
             ws_cmd_tx,
             ws_state_rx,
-            logout_notify,
             ws_started: Arc::new(Once::new()),
             ws_spawn: Arc::new(Mutex::new(Some(ws_spawn))),
         })
@@ -234,13 +229,7 @@ impl GrindrClient {
         self.ws_started.call_once(|| {
             // Only this closure runs (once), so the parts are always present.
             if let Some(parts) = self.ws_spawn.lock().unwrap().take() {
-                crate::ws::spawn_ws_task(
-                    parts.inner,
-                    parts.auth,
-                    parts.channels,
-                    parts.cmd_rx,
-                    parts.logout_notify,
-                );
+                crate::ws::spawn_ws_task(parts.inner, parts.auth, parts.channels, parts.cmd_rx);
             }
         });
     }
@@ -309,10 +298,11 @@ impl GrindrClient {
         crate::auth::refresh_token(&self.inner, &self.auth).await
     }
 
-    /// Clears the session and closes the websocket.
+    /// Clears the session and closes the websocket, without reconnecting while
+    /// logged out. Keeps the device identity and transport — use
+    /// [`sign_out_rotating`](Self::sign_out_rotating) to also rotate those.
     pub async fn logout(&self) {
         self.auth.clear_session().await;
-        self.logout_notify.notify_waiters();
     }
 
     /// Makes an authenticated request and returns the raw status and body.
@@ -365,8 +355,10 @@ impl GrindrClient {
             .await
     }
 
-    /// Replaces the device identity (and its clients) while keeping the session.
-    /// Returns the old device.
+    /// Replaces the device identity and the underlying HTTP/TLS transport while
+    /// keeping the session, and returns the old device. Building new `wreq`
+    /// clients also drops the connection pool and TLS session-resumption cache,
+    /// so nothing from the old device carries over to later requests.
     pub async fn rotate_device(&self, device: DeviceInfo) -> Result<DeviceInfo, GrindrError> {
         let new_fp = build_fingerprint(device)?;
         let old_fp = {
@@ -374,6 +366,16 @@ impl GrindrClient {
             std::mem::replace(&mut *guard, new_fp)
         };
         Ok(old_fp.device.clone())
+    }
+
+    /// [`logout`](Self::logout) then [`rotate_device`](Self::rotate_device):
+    /// clears the session and rotates the device identity and transport so the
+    /// next login cannot be correlated with this one. Pass a fresh
+    /// [`DeviceInfo`] to persist and reuse until the next sign-out; returns the
+    /// old device.
+    pub async fn sign_out_rotating(&self, device: DeviceInfo) -> Result<DeviceInfo, GrindrError> {
+        self.logout().await;
+        self.rotate_device(device).await
     }
 
     /// The device identity currently in use.
@@ -452,5 +454,44 @@ mod tests {
         let clone = client.clone();
         drop(client);
         drop(clone);
+    }
+
+    fn fake_session() -> Session {
+        Session {
+            email: "user@example.com".to_owned(),
+            expires_at: u64::MAX,
+            profile_id: "1".to_owned(),
+            session_id: "sid".to_owned(),
+            auth_token: "atok".to_owned(),
+            kind: crate::auth::SessionKind::Email,
+            third_party_user_id: None,
+            restriction: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn rotate_device_swaps_identity_and_returns_old() {
+        let old = DeviceInfo::generate();
+        let client = GrindrClient::new(old.clone(), None).unwrap();
+
+        let returned = client.rotate_device(DeviceInfo::generate()).await.unwrap();
+        assert_eq!(returned.device_id, old.device_id);
+        assert_ne!(client.current_device().await.device_id, old.device_id);
+    }
+
+    #[tokio::test]
+    async fn sign_out_rotating_clears_session_and_rotates_device() {
+        let old = DeviceInfo::generate();
+        let client = GrindrClient::new(old.clone(), Some(fake_session())).unwrap();
+        assert!(client.session_receiver().borrow().is_some());
+
+        let returned = client
+            .sign_out_rotating(DeviceInfo::generate())
+            .await
+            .unwrap();
+
+        assert_eq!(returned.device_id, old.device_id);
+        assert_ne!(client.current_device().await.device_id, old.device_id);
+        assert!(client.session_receiver().borrow().is_none());
     }
 }

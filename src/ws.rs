@@ -4,11 +4,11 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::{broadcast, mpsc, watch, Notify};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::sleep;
 use wreq::websocket::{Message, WebSocket};
 
-use crate::auth::AuthState;
+use crate::auth::{AuthState, Session};
 use crate::error::GrindrError;
 use crate::headers::GrindrHeaders;
 use crate::rest::InnerClient;
@@ -82,7 +82,6 @@ pub(crate) fn spawn_ws_task(
     auth: Arc<AuthState>,
     channels: WsChannels,
     mut cmd_rx: mpsc::Receiver<WsCommand>,
-    logout_notify: Arc<Notify>,
 ) {
     tokio::spawn(async move {
         let mut session_rx = auth.session_tx.subscribe();
@@ -98,7 +97,7 @@ pub(crate) fn spawn_ws_task(
                 }
             }
 
-            match connect_and_run(&inner, &auth, &channels, &mut cmd_rx, &logout_notify).await {
+            match connect_and_run(&inner, &auth, &channels, &mut cmd_rx, &mut session_rx).await {
                 Ok(()) => {
                     let _ = channels.state_tx.send(WsConnectionState::Disconnected);
                     backoff = Duration::from_secs(1);
@@ -129,18 +128,10 @@ async fn connect_and_run(
     auth: &AuthState,
     channels: &WsChannels,
     cmd_rx: &mut mpsc::Receiver<WsCommand>,
-    logout_notify: &Notify,
+    session_rx: &mut watch::Receiver<Option<Session>>,
 ) -> Result<(), GrindrError> {
     let authorization = crate::auth::authorization_header(inner, auth)
         .await
-        .ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))?;
-
-    let session_id = auth
-        .session
-        .read()
-        .await
-        .as_ref()
-        .map(|s| s.session_id.clone())
         .ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))?;
 
     let fp = inner.fingerprint().await;
@@ -168,30 +159,35 @@ async fn connect_and_run(
 
     let _ = channels.state_tx.send(WsConnectionState::Connected);
 
-    run_message_loop(
-        &mut ws,
-        cmd_rx,
-        &session_id,
-        &channels.event_tx,
-        logout_notify,
-    )
-    .await
+    run_message_loop(&mut ws, cmd_rx, auth, session_rx, &channels.event_tx).await
+}
+
+async fn session_token(auth: &AuthState) -> Option<String> {
+    auth.session
+        .read()
+        .await
+        .as_ref()
+        .map(|s| s.session_id.clone())
 }
 
 async fn run_message_loop(
     ws: &mut WebSocket,
     cmd_rx: &mut mpsc::Receiver<WsCommand>,
-    session_id: &str,
+    auth: &AuthState,
+    session_rx: &mut watch::Receiver<Option<Session>>,
     event_tx: &broadcast::Sender<WsEvent>,
-    logout_notify: &Notify,
 ) -> Result<(), GrindrError> {
-    let logged_out = logout_notify.notified();
-    tokio::pin!(logged_out);
+    if session_token(auth).await.is_none() {
+        return Ok(());
+    }
 
     loop {
         tokio::select! {
-            _ = &mut logged_out => {
-                return Ok(());
+            changed = session_rx.changed() => {
+                let logged_out = changed.is_err() || session_rx.borrow_and_update().is_none();
+                if logged_out {
+                    return Ok(());
+                }
             }
             msg = ws.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
@@ -220,10 +216,13 @@ async fn run_message_loop(
             },
             cmd = cmd_rx.recv() => match cmd {
                 Some(cmd) => {
+                    let Some(token) = session_token(auth).await else {
+                        return Ok(());
+                    };
                     let json = serde_json::json!({
                         "type": cmd.r#type,
                         "ref":  cmd.ref_id,
-                        "token": session_id,
+                        "token": token,
                         "payload": cmd.payload,
                     });
                     ws.send(Message::text(json.to_string()))

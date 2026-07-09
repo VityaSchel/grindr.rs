@@ -54,10 +54,12 @@ mod headers;
 mod rest;
 mod ws;
 
-pub use auth::{AuthEvent, LoginResult, Session, SessionKind};
+pub use auth::{
+    AuthEvent, BanDetails, LoginResult, Restriction, Session, SessionKind, VerificationRegion,
+};
 pub use client::{probe_emulation, GrindrClient};
 pub use device::DeviceInfo;
-pub use error::GrindrError;
+pub use error::{BanInfo, BanKind, GrindrError};
 pub use headers::{build_device_info_header, build_user_agent, GrindrHeaders, APP_VERSION};
 pub use rest::RawResponse;
 pub use ws::{WsCommand, WsConnectionState, WsEvent};

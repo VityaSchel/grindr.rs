@@ -6,7 +6,7 @@ use wreq::{Client, Method, RequestBuilder};
 
 use crate::auth::AuthState;
 use crate::device::DeviceInfo;
-use crate::error::GrindrError;
+use crate::error::{BanInfo, BanKind, GrindrError};
 use crate::headers::GrindrHeaders;
 
 pub(crate) const BASE_URL: &str = "https://grindr.mobi";
@@ -176,10 +176,28 @@ const MAX_ERROR_BODY: usize = 1024;
 
 pub(crate) fn parse_api_error(bytes: &[u8], http_status: u16) -> GrindrError {
     let (code, message) = extract_api_error(bytes, http_status);
-    if http_status == 401 {
-        GrindrError::Unauthorized { code, message }
-    } else {
-        GrindrError::Api { code, message }
+
+    if let Some(kind) = BanKind::from_code(code) {
+        return GrindrError::Banned(ban_info(kind, code, message, bytes));
+    }
+
+    match http_status {
+        401 => GrindrError::Unauthorized { code, message },
+        429 => GrindrError::RateLimited,
+        _ => GrindrError::Api { code, message },
+    }
+}
+
+fn ban_info(kind: BanKind, code: i32, message: String, bytes: &[u8]) -> BanInfo {
+    let json = serde_json::from_slice::<serde_json::Value>(bytes).ok();
+    let field = |key: &str| json.as_ref().and_then(|j| j.get(key));
+    BanInfo {
+        kind,
+        code,
+        message,
+        reason: field("reason").and_then(|v| v.as_str()).map(str::to_owned),
+        sub_reason: field("banSubReason").and_then(|v| v.as_str()).map(str::to_owned),
+        automated: field("isBanAutomated").and_then(|v| v.as_bool()),
     }
 }
 
@@ -245,6 +263,33 @@ mod tests {
     fn from_response_maps_401_to_unauthorized() {
         let err = GrindrError::from_response(401, b"{}");
         assert!(matches!(err, GrindrError::Unauthorized { code: 401, .. }));
+    }
+
+    #[test]
+    fn from_response_maps_429_to_rate_limited() {
+        let err = GrindrError::from_response(429, b"{}");
+        assert!(matches!(err, GrindrError::RateLimited));
+    }
+
+    #[test]
+    fn from_response_classifies_ban_with_body_fields() {
+        let err = GrindrError::from_response(
+            403,
+            br#"{"code":27,"message":"Profile is banned","banSubReason":"DRUG_SALES","isBanAutomated":true}"#,
+        );
+        let GrindrError::Banned(info) = err else {
+            panic!("expected Banned, got {err:?}");
+        };
+        assert_eq!(info.kind, BanKind::Profile);
+        assert_eq!(info.code, 27);
+        assert_eq!(info.sub_reason.as_deref(), Some("DRUG_SALES"));
+        assert_eq!(info.automated, Some(true));
+    }
+
+    #[test]
+    fn from_response_maps_device_ban_code() {
+        let err = GrindrError::from_response(403, br#"{"code":28,"message":"ACCOUNT_BANNED"}"#);
+        assert!(matches!(err, GrindrError::Banned(info) if info.kind == BanKind::Device));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
-use crate::error::GrindrError;
+use crate::error::{BanInfo, GrindrError};
 use crate::rest::InnerClient;
 
 /// How a [`Session`] was obtained.
@@ -45,6 +45,58 @@ pub struct Session {
     /// Vendor-scoped user id for third-party logins, if any.
     #[serde(default)]
     pub third_party_user_id: Option<String>,
+    /// Account restriction from the session JWT, if any. The session is valid.
+    #[serde(default)]
+    pub restriction: Option<Restriction>,
+}
+
+/// An account restriction carried in the session JWT.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum Restriction {
+    /// Age verification is required.
+    AgeVerification {
+        /// Region whose rules apply.
+        region: VerificationRegion,
+        /// Raw `restrictionReason` value.
+        reason: String,
+    },
+    /// A time-limited ban.
+    TimedBan(BanDetails),
+    /// Rejected by the anti-fraud vendor.
+    TrustVendorRejected,
+    /// A value this version does not model.
+    Other(String),
+}
+
+/// Region for a [`Restriction::AgeVerification`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum VerificationRegion {
+    /// United Kingdom.
+    Uk,
+    /// Brazil.
+    Br,
+    /// Australia.
+    Au,
+    /// A region this version does not model.
+    Other,
+}
+
+/// A timed ban's details, from the JWT `banDetails` claim.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct BanDetails {
+    /// Unix seconds when the ban expires.
+    pub expiry_time: Option<i64>,
+    /// Ban reason.
+    pub reason: Option<String>,
+    /// Ban sub-reason.
+    pub sub_reason: Option<String>,
+    /// Whether the ban was automated.
+    #[serde(default)]
+    pub is_automated: bool,
 }
 
 impl fmt::Debug for Session {
@@ -59,6 +111,7 @@ impl fmt::Debug for Session {
             .field("auth_token", &"<redacted>")
             .field("kind", &self.kind)
             .field("third_party_user_id", &self.third_party_user_id)
+            .field("restriction", &self.restriction)
             .finish()
     }
 }
@@ -69,6 +122,8 @@ impl fmt::Debug for Session {
 pub struct LoginResult {
     /// The authenticated account's profile id.
     pub profile_id: String,
+    /// Account restriction, if any. A session was still established.
+    pub restriction: Option<Restriction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,8 +161,37 @@ struct ThirdPartyRefreshRequest<'a> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct JwtClaims {
     exp: u64,
+    #[serde(default)]
+    restriction: Option<String>,
+    #[serde(default)]
+    restriction_reason: Option<String>,
+    #[serde(default)]
+    ban_details: Option<BanDetails>,
+}
+
+fn restriction_from_claims(claims: &JwtClaims) -> Option<Restriction> {
+    let restriction = claims.restriction.as_deref()?;
+    Some(match restriction {
+        "AGE_RESTRICTED" => Restriction::AgeVerification {
+            region: region_from_reason(claims.restriction_reason.as_deref()),
+            reason: claims.restriction_reason.clone().unwrap_or_default(),
+        },
+        "TIMED_BAN" => Restriction::TimedBan(claims.ban_details.clone().unwrap_or_default()),
+        "TRUST_VENDOR_REJECTED" => Restriction::TrustVendorRejected,
+        other => Restriction::Other(other.to_owned()),
+    })
+}
+
+fn region_from_reason(reason: Option<&str>) -> VerificationRegion {
+    match reason {
+        Some("UK_VERIFICATION_REQUIRED") => VerificationRegion::Uk,
+        Some("BR_VERIFICATION_REQUIRED") => VerificationRegion::Br,
+        Some("AU_VERIFICATION_REQUIRED") => VerificationRegion::Au,
+        _ => VerificationRegion::Other,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -184,16 +268,20 @@ impl AuthRequest for RefreshRequest {
     }
 }
 
-/// Emitted on the channel returned by
-/// [`GrindrClient::auth_event_receiver`](crate::GrindrClient::auth_event_receiver)
-/// when a background token refresh fails.
+/// Emitted on [`GrindrClient::auth_event_receiver`](crate::GrindrClient::auth_event_receiver)
+/// when a background token refresh changes the auth state.
 #[derive(Debug, Clone)]
-pub struct AuthEvent {
-    /// Human-readable description of the failure.
-    pub message: String,
-    /// `true` if the failure was a `401` and the session has been cleared,
-    /// meaning the user must log in again.
-    pub unauthorized: bool,
+#[non_exhaustive]
+pub enum AuthEvent {
+    /// Session cleared (`401`); log in again.
+    LoggedOut,
+    /// The account is banned; session cleared.
+    Banned(BanInfo),
+    /// A transient refresh failure; the session is kept.
+    RefreshFailed {
+        /// What went wrong.
+        message: String,
+    },
 }
 
 pub(crate) struct AuthState {
@@ -247,6 +335,7 @@ pub(crate) async fn create_session(
         expires_at: claims.exp,
         kind,
         third_party_user_id,
+        restriction: restriction_from_claims(&claims),
     })
 }
 
@@ -264,8 +353,12 @@ pub(crate) async fn login_email(
     };
     let session = create_session(inner, &body, SessionKind::Email, None).await?;
     let profile_id = session.profile_id.clone();
+    let restriction = session.restriction.clone();
     auth.set_session(session).await;
-    Ok(LoginResult { profile_id })
+    Ok(LoginResult {
+        profile_id,
+        restriction,
+    })
 }
 
 pub(crate) async fn google_sign_in(
@@ -287,8 +380,12 @@ pub(crate) async fn google_sign_in(
     let fallback_email = tp.third_party_user_id.clone();
     let session = session_from_third_party(tp, fallback_email)?;
     let profile_id = session.profile_id.clone();
+    let restriction = session.restriction.clone();
     auth.set_session(session).await;
-    Ok(LoginResult { profile_id })
+    Ok(LoginResult {
+        profile_id,
+        restriction,
+    })
 }
 
 fn session_from_third_party(
@@ -304,6 +401,7 @@ fn session_from_third_party(
         expires_at: claims.exp,
         kind: SessionKind::Google,
         third_party_user_id: Some(tp.third_party_user_id),
+        restriction: restriction_from_claims(&claims),
     })
 }
 
@@ -363,8 +461,34 @@ pub(crate) async fn refresh_token(
     };
 
     let profile_id = session.profile_id.clone();
+    let restriction = session.restriction.clone();
     auth.set_session(session).await;
-    Ok(LoginResult { profile_id })
+    Ok(LoginResult {
+        profile_id,
+        restriction,
+    })
+}
+
+async fn emit_refresh_failure(auth: &AuthState, error: GrindrError) {
+    let event = match error {
+        GrindrError::Unauthorized { .. } => {
+            auth.clear_session().await;
+            AuthEvent::LoggedOut
+        }
+        GrindrError::Banned(info) => {
+            auth.clear_session().await;
+            AuthEvent::Banned(info)
+        }
+        other => {
+            if auth.session.read().await.is_none() {
+                return;
+            }
+            AuthEvent::RefreshFailed {
+                message: other.to_string(),
+            }
+        }
+    };
+    let _ = auth.auth_event_tx.send(event);
 }
 
 /// Refresh after an authenticated request returned `401`.
@@ -385,16 +509,7 @@ pub(crate) async fn refresh_after_unauthorized(
         Ok(_) => true,
         Err(e) => {
             tracing::warn!("reactive token refresh failed: {e}");
-            let unauthorized = matches!(e, GrindrError::Unauthorized { .. });
-            if unauthorized {
-                auth.clear_session().await;
-            }
-            if unauthorized || auth.session.read().await.is_some() {
-                let _ = auth.auth_event_tx.send(AuthEvent {
-                    message: e.to_string(),
-                    unauthorized,
-                });
-            }
+            emit_refresh_failure(auth, e).await;
             false
         }
     }
@@ -428,16 +543,7 @@ pub(crate) async fn authorization_header(inner: &InnerClient, auth: &AuthState) 
         if still_expired {
             if let Err(e) = refresh_token(inner, auth).await {
                 tracing::warn!("token refresh failed: {e}");
-                let unauthorized = matches!(e, GrindrError::Unauthorized { .. });
-                if unauthorized {
-                    auth.clear_session().await;
-                }
-                if unauthorized || auth.session.read().await.is_some() {
-                    let _ = auth.auth_event_tx.send(AuthEvent {
-                        message: e.to_string(),
-                        unauthorized,
-                    });
-                }
+                emit_refresh_failure(auth, e).await;
             }
         }
     }
@@ -501,5 +607,33 @@ mod tests {
             session_from_third_party(third_party_session(None), "fallback@example.com".to_owned())
                 .unwrap();
         assert_eq!(session.email, "fallback@example.com");
+    }
+
+    #[test]
+    fn age_restricted_claims_map_to_age_verification() {
+        let claims = JwtClaims {
+            exp: 0,
+            restriction: Some("AGE_RESTRICTED".to_owned()),
+            restriction_reason: Some("UK_VERIFICATION_REQUIRED".to_owned()),
+            ban_details: None,
+        };
+        assert_eq!(
+            restriction_from_claims(&claims),
+            Some(Restriction::AgeVerification {
+                region: VerificationRegion::Uk,
+                reason: "UK_VERIFICATION_REQUIRED".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn unrestricted_claims_map_to_none() {
+        let claims = JwtClaims {
+            exp: 0,
+            restriction: None,
+            restriction_reason: None,
+            ban_details: None,
+        };
+        assert_eq!(restriction_from_claims(&claims), None);
     }
 }

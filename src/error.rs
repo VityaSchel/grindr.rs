@@ -36,10 +36,70 @@ pub enum GrindrError {
         message: String,
     },
 
+    /// Login or refresh was refused because the account, device, or network is
+    /// banned.
+    #[error("banned: {0}")]
+    Banned(BanInfo),
+
+    /// The API returned `429`.
+    #[error("rate limited")]
+    RateLimited,
+
     /// A request argument was malformed, e.g. a path that does not begin with
     /// `/` and could therefore repoint the request to a different host.
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+}
+
+/// What a [`GrindrError::Banned`] applies to, from the error code in the body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BanKind {
+    /// Code 27.
+    Profile,
+    /// Code 28. Often spurious: a bad security fingerprint blocks the request,
+    /// not the account.
+    Device,
+    /// Code 31 (`SUSPICIOUS_NETWORK`).
+    Network,
+    /// Codes 35 and 36 (underage).
+    Underage,
+}
+
+impl BanKind {
+    pub(crate) fn from_code(code: i32) -> Option<Self> {
+        Some(match code {
+            27 => Self::Profile,
+            28 => Self::Device,
+            31 => Self::Network,
+            35 | 36 => Self::Underage,
+            _ => return None,
+        })
+    }
+}
+
+/// Details of a ban from the login/refresh response body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BanInfo {
+    /// What the ban applies to.
+    pub kind: BanKind,
+    /// Grindr error code.
+    pub code: i32,
+    /// Message from the body.
+    pub message: String,
+    /// Body `reason`, if present.
+    pub reason: Option<String>,
+    /// Body `banSubReason`, if present.
+    pub sub_reason: Option<String>,
+    /// Body `isBanAutomated`, if present.
+    pub automated: Option<bool>,
+}
+
+impl std::fmt::Display for BanInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?} (code {}): {}", self.kind, self.code, self.message)
+    }
 }
 
 impl GrindrError {

@@ -1,13 +1,18 @@
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use serde::{de::DeserializeOwned, Serialize};
+use tokio::sync::watch;
+use wreq::header::HeaderMap;
 use wreq::{Client, Method, RequestBuilder};
 
 use crate::auth::AuthState;
 use crate::device::DeviceInfo;
 use crate::error::{BanInfo, BanKind, GrindrError};
 use crate::headers::GrindrHeaders;
+use crate::signing::{signing_reject, DeviceKey, DeviceSigningKey, SigningReject};
 
 pub(crate) const BASE_URL: &str = "https://grindr.mobi";
 
@@ -61,11 +66,54 @@ pub(crate) enum RequestBody {
 
 pub(crate) struct InnerClient {
     pub fingerprint: tokio::sync::RwLock<Arc<Fingerprint>>,
+    pub signing: tokio::sync::Mutex<Option<DeviceKey>>,
+    pub signing_key_tx: watch::Sender<Option<DeviceSigningKey>>,
+    pub server_offset_ms: AtomicI64,
+}
+
+fn local_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 impl InnerClient {
     pub async fn fingerprint(&self) -> Arc<Fingerprint> {
         Arc::clone(&*self.fingerprint.read().await)
+    }
+
+    pub async fn clear_signing(&self) {
+        self.signing.lock().await.take();
+        let _ = self.signing_key_tx.send(None);
+    }
+
+    pub async fn restore_signing_key(&self, key: DeviceSigningKey) {
+        if let Some(device_key) = DeviceKey::from_stored(&key) {
+            *self.signing.lock().await = Some(device_key);
+            let _ = self.signing_key_tx.send(Some(key));
+        }
+    }
+
+    /// Tracks the local↔server clock skew from a response's `Date` header, so
+    /// signed uploads carry an `X-Timestamp` the server accepts (the app corrects
+    /// this reactively on a `timestamp_drift` rejection; seeding from `Date`
+    /// avoids that round-trip).
+    fn note_server_date(&self, headers: &HeaderMap) {
+        let server_ms = headers
+            .get("date")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|d| httpdate::parse_http_date(d).ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64);
+        if let Some(server_ms) = server_ms {
+            self.server_offset_ms
+                .store(server_ms - local_now_ms(), Ordering::Relaxed);
+        }
+    }
+
+    fn synced_now_ms(&self) -> u64 {
+        (local_now_ms() + self.server_offset_ms.load(Ordering::Relaxed)).max(0) as u64
     }
 
     fn apply_headers(
@@ -101,6 +149,7 @@ impl InnerClient {
         }
 
         let resp = req.send().await?;
+        self.note_server_date(resp.headers());
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let bytes = resp.bytes().await.unwrap_or_default();
@@ -152,6 +201,7 @@ impl InnerClient {
             }
 
             let resp = req.send().await?;
+            self.note_server_date(resp.headers());
             let status = resp.status().as_u16();
             let body_bytes = resp.bytes().await?.to_vec();
 
@@ -170,6 +220,161 @@ impl InnerClient {
             });
         }
     }
+
+    async fn authed_json<T: DeserializeOwned>(
+        &self,
+        auth: &AuthState,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<T, GrindrError> {
+        let resp = self
+            .request_authenticated(auth, method, path, body.map(RequestBody::Json))
+            .await?;
+        if !(200..300).contains(&resp.status) {
+            return Err(parse_api_error(&resp.body, resp.status));
+        }
+        serde_json::from_slice(&resp.body).map_err(|e| GrindrError::Http(e.to_string()))
+    }
+
+    async fn ensure_device_key(&self, auth: &AuthState) -> Result<(), GrindrError> {
+        let user_id = session_user_id(auth).await?;
+        let mut guard = self.signing.lock().await;
+        if guard.as_ref().is_some_and(|k| k.user_id() == user_id) {
+            return Ok(());
+        }
+
+        let android_id = self.fingerprint().await.device.device_id.clone();
+        let key = DeviceKey::generate(user_id);
+
+        let challenge: crate::signing::ChallengeResponse = self
+            .authed_json(
+                auth,
+                Method::POST,
+                "/v1/verification/device-keys/challenge",
+                None,
+            )
+            .await?;
+
+        let registration_signature =
+            key.registration_signature(&android_id, &challenge.challenge);
+        let body = serde_json::to_value(crate::signing::RegisterKeyRequest {
+            public_key: key.public_key(),
+            key_id: key.key_id(),
+            registration_signature: &registration_signature,
+        })
+        .map_err(|e| GrindrError::Http(e.to_string()))?;
+
+        let resp = self
+            .request_authenticated(
+                auth,
+                Method::POST,
+                "/v1/verification/device-keys",
+                Some(RequestBody::Json(body)),
+            )
+            .await?;
+        if !(200..300).contains(&resp.status) {
+            return Err(parse_api_error(&resp.body, resp.status));
+        }
+
+        let exported = key.export();
+        *guard = Some(key);
+        let _ = self.signing_key_tx.send(Some(exported));
+        Ok(())
+    }
+
+    pub async fn request_signed(
+        &self,
+        auth: &AuthState,
+        method: Method,
+        path: &str,
+        content_type: &str,
+        body: Bytes,
+    ) -> Result<RawResponse, GrindrError> {
+        validate_path(path)?;
+        self.ensure_device_key(auth).await?;
+
+        let mut refreshed = false;
+        let mut resigned = false;
+        loop {
+            let authorization = crate::auth::authorization_header(self, auth)
+                .await
+                .ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))?;
+            let session_id = auth
+                .session
+                .read()
+                .await
+                .as_ref()
+                .map(|s| s.session_id.clone());
+
+            let fp = self.fingerprint().await;
+            let android_id = fp.device.device_id.clone();
+            let timestamp = self.synced_now_ms();
+            let signature = {
+                let guard = self.signing.lock().await;
+                guard
+                    .as_ref()
+                    .ok_or_else(|| GrindrError::Auth("device key not registered".to_owned()))?
+                    .upload_headers(&android_id, &body, timestamp)
+            };
+
+            let headers = GrindrHeaders::build(
+                &fp.device,
+                &fp.user_agent,
+                Some(&authorization),
+                Some("[FREE]"),
+            )?;
+            let req = Self::apply_headers(
+                fp.http.request(method.clone(), format!("{BASE_URL}{path}")),
+                &headers.items,
+            )
+            .header("x-key-id", &signature.key_id)
+            .header("x-sig", &signature.signature)
+            .header("x-timestamp", signature.timestamp.to_string())
+            .header("x-nonce", &signature.nonce)
+            .header("content-type", content_type)
+            .body(body.clone());
+
+            let resp = req.send().await?;
+            self.note_server_date(resp.headers());
+            let status = resp.status().as_u16();
+            let body_bytes = resp.bytes().await?.to_vec();
+
+            if status == 401 && !refreshed {
+                refreshed = true;
+                if let Some(stale) = session_id {
+                    if crate::auth::refresh_after_unauthorized(self, auth, &stale).await {
+                        continue;
+                    }
+                }
+            }
+
+            if !(200..300).contains(&status) {
+                match signing_reject(&body_bytes) {
+                    Some(SigningReject::Retryable) if !resigned => {
+                        resigned = true;
+                        continue;
+                    }
+                    Some(SigningReject::Fatal) => self.clear_signing().await,
+                    _ => {}
+                }
+            }
+
+            return Ok(RawResponse {
+                status,
+                body: body_bytes,
+            });
+        }
+    }
+}
+
+async fn session_user_id(auth: &AuthState) -> Result<String, GrindrError> {
+    auth.session
+        .read()
+        .await
+        .as_ref()
+        .map(|s| s.profile_id.clone())
+        .ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))
 }
 
 const MAX_ERROR_BODY: usize = 1024;

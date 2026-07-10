@@ -52,6 +52,7 @@ mod device;
 mod error;
 mod headers;
 mod rest;
+mod signing;
 mod ws;
 
 pub use auth::{
@@ -62,6 +63,9 @@ pub use device::DeviceInfo;
 pub use error::{BanInfo, BanKind, GrindrError};
 pub use headers::{build_device_info_header, build_user_agent, GrindrHeaders, APP_VERSION};
 pub use rest::RawResponse;
+pub use signing::{
+    DeviceSigningKey, MediaUploadResponse, UploadProfileImageResponse, UploadedProfileImage,
+};
 pub use ws::{WsCommand, WsConnectionState, WsEvent};
 
 /// Request body bytes, re-exported from [`bytes`] for use with

@@ -12,6 +12,7 @@ use crate::device::DeviceInfo;
 use crate::error::GrindrError;
 use crate::headers::build_user_agent;
 use crate::rest::{Fingerprint, InnerClient, RawResponse, RequestBody};
+use crate::signing::{DeviceSigningKey, MediaUploadResponse, UploadProfileImageResponse};
 use crate::ws::{make_channels, WsChannels, WsCommand, WsConnectionState, WsEvent};
 
 /// References <https://opengrind.org/grindr-api/security-headers#cipher-suites>
@@ -143,6 +144,13 @@ fn build_fingerprint(device: DeviceInfo) -> Result<Arc<Fingerprint>, GrindrError
     }))
 }
 
+fn parse_json<T: serde::de::DeserializeOwned>(resp: RawResponse) -> Result<T, GrindrError> {
+    if !(200..300).contains(&resp.status) {
+        return Err(GrindrError::from_response(resp.status, &resp.body));
+    }
+    serde_json::from_slice(&resp.body).map_err(|e| GrindrError::Http(e.to_string()))
+}
+
 /// Everything needed to start the background websocket task.
 struct WsSpawn {
     inner: Arc<InnerClient>,
@@ -171,6 +179,7 @@ pub struct GrindrClient {
     inner: Arc<InnerClient>,
     auth: Arc<AuthState>,
     session_rx: watch::Receiver<Option<Session>>,
+    signing_key_rx: watch::Receiver<Option<DeviceSigningKey>>,
     ws_event_tx: broadcast::Sender<WsEvent>,
     ws_cmd_tx: mpsc::Sender<WsCommand>,
     ws_state_rx: watch::Receiver<WsConnectionState>,
@@ -188,8 +197,12 @@ impl GrindrClient {
     pub fn new(device: DeviceInfo, session: Option<Session>) -> Result<Self, GrindrError> {
         let fingerprint = build_fingerprint(device)?;
 
+        let (signing_key_tx, signing_key_rx) = watch::channel(None);
         let inner = Arc::new(InnerClient {
             fingerprint: tokio::sync::RwLock::new(fingerprint),
+            signing: tokio::sync::Mutex::new(None),
+            signing_key_tx,
+            server_offset_ms: std::sync::atomic::AtomicI64::new(0),
         });
 
         let (auth_state, session_rx) = AuthState::new(session);
@@ -212,6 +225,7 @@ impl GrindrClient {
             inner,
             auth,
             session_rx,
+            signing_key_rx,
             ws_event_tx,
             ws_cmd_tx,
             ws_state_rx,
@@ -246,6 +260,25 @@ impl GrindrClient {
     /// session to disk.
     pub fn session_receiver(&self) -> watch::Receiver<Option<Session>> {
         self.session_rx.clone()
+    }
+
+    /// Watches the current [`DeviceSigningKey`] (used to sign media uploads).
+    ///
+    /// It changes when a key is registered on first upload (save it in secure
+    /// storage alongside the session) and clears on [`logout`](Self::logout) /
+    /// [`rotate_device`](Self::rotate_device). Restore a saved one with
+    /// [`restore_signing_key`](Self::restore_signing_key) to avoid re-registering.
+    pub fn signing_key_receiver(&self) -> watch::Receiver<Option<DeviceSigningKey>> {
+        self.signing_key_rx.clone()
+    }
+
+    /// Restores a persisted [`DeviceSigningKey`] so uploads reuse it instead of
+    /// registering a fresh key.
+    ///
+    /// Silently ignored if it can't decode; if it was saved for a different
+    /// account than the current session, it's replaced on the next upload.
+    pub async fn restore_signing_key(&self, key: DeviceSigningKey) {
+        self.inner.restore_signing_key(key).await;
     }
 
     /// Watches the websocket [`WsConnectionState`].
@@ -339,6 +372,7 @@ impl GrindrClient {
     /// [`sign_out_rotating`](Self::sign_out_rotating) to also rotate those.
     pub async fn logout(&self) {
         self.auth.clear_session().await;
+        self.inner.clear_signing().await;
     }
 
     /// Makes an authenticated request and returns the raw status and body.
@@ -391,6 +425,68 @@ impl GrindrClient {
             .await
     }
 
+    /// Sends a device-key-signed request with a raw binary body, for the upload
+    /// endpoints that require it (`/v5/media/upload`, `/v6/chat/media/upload`).
+    ///
+    /// On first use it registers an ephemeral P-256 key for the session; the key
+    /// is dropped on [`logout`](Self::logout) and [`rotate_device`](Self::rotate_device).
+    /// Prefer [`upload_profile_image`](Self::upload_profile_image) /
+    /// [`upload_chat_media`](Self::upload_chat_media) unless you need another path.
+    pub async fn request_signed_bytes(
+        &self,
+        method: Method,
+        path: &str,
+        content_type: &str,
+        body: impl Into<Bytes>,
+    ) -> Result<RawResponse, GrindrError> {
+        self.inner
+            .request_signed(&self.auth, method, path, content_type, body.into())
+            .await
+    }
+
+    /// Uploads a profile image via signed `POST /v5/media/upload`.
+    ///
+    /// `thumb_coords` is an optional `"x,y,w,h"` crop; `taken_on_grindr` marks
+    /// images captured in-app.
+    pub async fn upload_profile_image(
+        &self,
+        jpeg: impl Into<Bytes>,
+        thumb_coords: Option<&str>,
+        taken_on_grindr: bool,
+    ) -> Result<UploadProfileImageResponse, GrindrError> {
+        let mut path = format!("/v5/media/upload?takenOnGrindr={taken_on_grindr}");
+        if let Some(coords) = thumb_coords {
+            path.push_str("&thumbCoords=");
+            path.push_str(coords);
+        }
+        let resp = self
+            .request_signed_bytes(Method::POST, &path, "image/jpeg", jpeg)
+            .await?;
+        parse_json(resp)
+    }
+
+    /// Uploads chat media via signed `POST /v6/chat/media/upload`.
+    pub async fn upload_chat_media(
+        &self,
+        bytes: impl Into<Bytes>,
+        content_type: &str,
+        length: Option<i64>,
+        looping: Option<bool>,
+        taken_on_grindr: bool,
+    ) -> Result<MediaUploadResponse, GrindrError> {
+        let mut path = format!("/v6/chat/media/upload?takenOnGrindr={taken_on_grindr}");
+        if let Some(length) = length {
+            path.push_str(&format!("&length={length}"));
+        }
+        if let Some(looping) = looping {
+            path.push_str(&format!("&looping={looping}"));
+        }
+        let resp = self
+            .request_signed_bytes(Method::POST, &path, content_type, bytes)
+            .await?;
+        parse_json(resp)
+    }
+
     /// Replaces the device identity and the underlying HTTP/TLS transport while
     /// keeping the session, and returns the old device. Building new `wreq`
     /// clients also drops the connection pool and TLS session-resumption cache,
@@ -401,6 +497,7 @@ impl GrindrClient {
             let mut guard = self.inner.fingerprint.write().await;
             std::mem::replace(&mut *guard, new_fp)
         };
+        self.inner.clear_signing().await;
         Ok(old_fp.device.clone())
     }
 

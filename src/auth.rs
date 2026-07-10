@@ -344,12 +344,13 @@ pub(crate) async fn login_email(
     auth: &AuthState,
     email: &str,
     password: &str,
+    geohash: Option<&str>,
 ) -> Result<LoginResult, GrindrError> {
     let body = LoginRequest {
         email: email.to_owned(),
         password: password.to_owned(),
         token: None,
-        geohash: None,
+        geohash: geohash.map(str::to_owned),
     };
     let session = create_session(inner, &body, SessionKind::Email, None).await?;
     let profile_id = session.profile_id.clone();
@@ -365,11 +366,12 @@ pub(crate) async fn google_sign_in(
     inner: &InnerClient,
     auth: &AuthState,
     google_access_token: &str,
+    geohash: Option<&str>,
 ) -> Result<LoginResult, GrindrError> {
     let body = ThirdPartySignInRequest {
         third_party_vendor: 2,
         third_party_token: google_access_token,
-        geohash: None,
+        geohash,
     };
     let parsed: ThirdPartyAuthResponse = inner
         .request_no_auth(wreq::Method::POST, "/v8/sessions/thirdparty", Some(&body))
@@ -410,11 +412,12 @@ async fn refresh_third_party_session(
     third_party_user_id: &str,
     auth_token: &str,
     fallback_email: String,
+    geohash: Option<&str>,
 ) -> Result<Session, GrindrError> {
     let body = ThirdPartyRefreshRequest {
         third_party_user_id,
         auth_token,
-        geohash: None,
+        geohash,
     };
     let parsed: ThirdPartyAuthResponse = inner
         .request_no_auth(wreq::Method::POST, "/v8/sessions/thirdparty", Some(&body))
@@ -428,6 +431,7 @@ async fn refresh_third_party_session(
 pub(crate) async fn refresh_token(
     inner: &InnerClient,
     auth: &AuthState,
+    geohash: Option<&str>,
 ) -> Result<LoginResult, GrindrError> {
     let (kind, email, auth_token, third_party_user_id) = {
         let guard = auth.session.read().await;
@@ -448,7 +452,7 @@ pub(crate) async fn refresh_token(
                 email,
                 auth_token,
                 token: None,
-                geohash: None,
+                geohash: geohash.map(str::to_owned),
             };
             create_session(inner, &body, SessionKind::Email, None).await?
         }
@@ -456,7 +460,8 @@ pub(crate) async fn refresh_token(
             let third_party_user_id = third_party_user_id.ok_or_else(|| {
                 GrindrError::Auth("google session missing third-party user id".to_owned())
             })?;
-            refresh_third_party_session(inner, &third_party_user_id, &auth_token, email).await?
+            refresh_third_party_session(inner, &third_party_user_id, &auth_token, email, geohash)
+                .await?
         }
     };
 
@@ -505,7 +510,7 @@ pub(crate) async fn refresh_after_unauthorized(
         Some(_) => {}
     }
 
-    match refresh_token(inner, auth).await {
+    match refresh_token(inner, auth, None).await {
         Ok(_) => true,
         Err(e) => {
             tracing::warn!("reactive token refresh failed: {e}");
@@ -541,7 +546,7 @@ pub(crate) async fn authorization_header(inner: &InnerClient, auth: &AuthState) 
         };
 
         if still_expired {
-            if let Err(e) = refresh_token(inner, auth).await {
+            if let Err(e) = refresh_token(inner, auth, None).await {
                 tracing::warn!("token refresh failed: {e}");
                 emit_refresh_failure(auth, e).await;
             }
@@ -585,6 +590,47 @@ mod tests {
         assert_eq!(json["authToken"], "auth-tok");
         assert!(json.get("email").is_none());
         assert!(json["geohash"].is_null());
+    }
+
+    #[test]
+    fn sign_in_bodies_carry_geohash_when_set() {
+        let login = serde_json::to_value(LoginRequest {
+            email: "user@example.com".to_owned(),
+            password: "pw".to_owned(),
+            token: None,
+            geohash: Some("9q8yyk8yuv".to_owned()),
+        })
+        .unwrap();
+        assert_eq!(login["geohash"], "9q8yyk8yuv");
+
+        let refresh = serde_json::to_value(RefreshRequest {
+            email: "user@example.com".to_owned(),
+            auth_token: "auth-tok".to_owned(),
+            token: None,
+            geohash: Some("9q8yyk8yuv".to_owned()),
+        })
+        .unwrap();
+        assert_eq!(refresh["geohash"], "9q8yyk8yuv");
+
+        let google = serde_json::to_value(ThirdPartySignInRequest {
+            third_party_vendor: 2,
+            third_party_token: "ya29.token",
+            geohash: Some("9q8yyk8yuv"),
+        })
+        .unwrap();
+        assert_eq!(google["geohash"], "9q8yyk8yuv");
+    }
+
+    #[test]
+    fn sign_in_bodies_omit_geohash_when_none() {
+        let login = serde_json::to_value(LoginRequest {
+            email: "user@example.com".to_owned(),
+            password: "pw".to_owned(),
+            token: None,
+            geohash: None,
+        })
+        .unwrap();
+        assert!(login["geohash"].is_null());
     }
 
     #[test]

@@ -279,7 +279,20 @@ impl GrindrClient {
 
     /// Logs in with email and password and stores the session.
     pub async fn login(&self, email: &str, password: &str) -> Result<LoginResult, GrindrError> {
-        crate::auth::login_email(&self.inner, &self.auth, email, password).await
+        self.login_with_geohash(email, password, None).await
+    }
+
+    /// Like [`login`](Self::login), but tags the sign-in request with a
+    /// `geohash` so the server records that approximate location for the new
+    /// session. Only this initial request carries it; later background refreshes
+    /// do not. Pass `None` to omit it.
+    pub async fn login_with_geohash(
+        &self,
+        email: &str,
+        password: &str,
+        geohash: Option<&str>,
+    ) -> Result<LoginResult, GrindrError> {
+        crate::auth::login_email(&self.inner, &self.auth, email, password, geohash).await
     }
 
     /// Signs in with a Google OAuth access token and stores the session.
@@ -287,7 +300,19 @@ impl GrindrClient {
         &self,
         google_access_token: &str,
     ) -> Result<LoginResult, GrindrError> {
-        crate::auth::google_sign_in(&self.inner, &self.auth, google_access_token).await
+        self.google_sign_in_with_geohash(google_access_token, None)
+            .await
+    }
+
+    /// Like [`google_sign_in`](Self::google_sign_in), but tags the sign-in
+    /// request with a `geohash`. Only this initial request carries it. Pass
+    /// `None` to omit it.
+    pub async fn google_sign_in_with_geohash(
+        &self,
+        google_access_token: &str,
+        geohash: Option<&str>,
+    ) -> Result<LoginResult, GrindrError> {
+        crate::auth::google_sign_in(&self.inner, &self.auth, google_access_token, geohash).await
     }
 
     /// Forces a token refresh.
@@ -295,7 +320,18 @@ impl GrindrClient {
     /// This happens automatically before the token expires, so you rarely need
     /// to call it yourself.
     pub async fn refresh_token(&self) -> Result<LoginResult, GrindrError> {
-        crate::auth::refresh_token(&self.inner, &self.auth).await
+        self.refresh_token_with_geohash(None).await
+    }
+
+    /// Like [`refresh_token`](Self::refresh_token), but tags the refresh request
+    /// with a `geohash`. Useful to seed the location of a session resumed from a
+    /// saved `auth_token` on its first request. Automatic background refreshes
+    /// never carry a geohash. Pass `None` to omit it.
+    pub async fn refresh_token_with_geohash(
+        &self,
+        geohash: Option<&str>,
+    ) -> Result<LoginResult, GrindrError> {
+        crate::auth::refresh_token(&self.inner, &self.auth, geohash).await
     }
 
     /// Clears the session and closes the websocket, without reconnecting while

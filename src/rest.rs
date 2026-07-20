@@ -214,10 +214,7 @@ impl InnerClient {
                 }
             }
 
-            return Ok(RawResponse {
-                status,
-                body: body_bytes,
-            });
+            return raw_or_blocked(status, body_bytes);
         }
     }
 
@@ -360,10 +357,7 @@ impl InnerClient {
                 }
             }
 
-            return Ok(RawResponse {
-                status,
-                body: body_bytes,
-            });
+            return raw_or_blocked(status, body_bytes);
         }
     }
 }
@@ -379,7 +373,29 @@ async fn session_user_id(auth: &AuthState) -> Result<String, GrindrError> {
 
 const MAX_ERROR_BODY: usize = 1024;
 
+/// `403` carrying Cloudflare's "you have been blocked" page instead of a
+/// Grindr response body.
+pub(crate) fn is_cloudflare_block(status: u16, body: &[u8]) -> bool {
+    if status != 403 {
+        return false;
+    }
+    let text = String::from_utf8_lossy(body);
+    text.contains("<title>Attention Required! | Cloudflare</title>")
+        && text.contains("Sorry, you have been blocked")
+}
+
+fn raw_or_blocked(status: u16, body: Vec<u8>) -> Result<RawResponse, GrindrError> {
+    if is_cloudflare_block(status, &body) {
+        return Err(GrindrError::Blocked);
+    }
+    Ok(RawResponse { status, body })
+}
+
 pub(crate) fn parse_api_error(bytes: &[u8], http_status: u16) -> GrindrError {
+    if is_cloudflare_block(http_status, bytes) {
+        return GrindrError::Blocked;
+    }
+
     let (code, message) = extract_api_error(bytes, http_status);
 
     if let Some(kind) = BanKind::from_code(code) {
@@ -495,6 +511,31 @@ mod tests {
     fn from_response_maps_device_ban_code() {
         let err = GrindrError::from_response(403, br#"{"code":28,"message":"ACCOUNT_BANNED"}"#);
         assert!(matches!(err, GrindrError::Banned(info) if info.kind == BanKind::Device));
+    }
+
+    const CLOUDFLARE_BLOCK_PAGE: &[u8] = br#"<!DOCTYPE html><html><head><title>Attention Required! | Cloudflare</title></head><body><h1>Sorry, you have been blocked</h1><p>You are unable to access grindr.mobi</p></body></html>"#;
+
+    #[test]
+    fn from_response_maps_cloudflare_block_to_blocked() {
+        let err = GrindrError::from_response(403, CLOUDFLARE_BLOCK_PAGE);
+        assert!(matches!(err, GrindrError::Blocked), "got {err:?}");
+    }
+
+    #[test]
+    fn cloudflare_block_needs_403_and_both_markers() {
+        assert!(is_cloudflare_block(403, CLOUDFLARE_BLOCK_PAGE));
+        assert!(!is_cloudflare_block(503, CLOUDFLARE_BLOCK_PAGE));
+        assert!(!is_cloudflare_block(403, br#"{"code":28,"message":"ACCOUNT_BANNED"}"#));
+        assert!(!is_cloudflare_block(
+            403,
+            b"<title>Attention Required! | Cloudflare</title>"
+        ));
+    }
+
+    #[test]
+    fn cloudflare_check_precedes_ban_classification() {
+        let err = GrindrError::from_response(403, br#"{"code":27,"message":"Profile is banned"}"#);
+        assert!(matches!(err, GrindrError::Banned(_)), "got {err:?}");
     }
 
     #[test]

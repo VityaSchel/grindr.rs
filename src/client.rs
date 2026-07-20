@@ -380,7 +380,9 @@ impl GrindrClient {
     /// `path` is added to the API base URL and must start with `/` (e.g.
     /// `/v3/me/profile`), otherwise you get [`GrindrError::InvalidRequest`]. The
     /// session token is added for you, refreshing first if it's about to expire.
-    /// The body comes back as-is for you to deserialize.
+    /// The body comes back as-is for you to deserialize, including non-success
+    /// statuses; map those with [`GrindrError::from_response`]. A Cloudflare
+    /// block page turns into [`GrindrError::Blocked`] instead.
     ///
     /// This crate doesn't ship response types. See the API reference at
     /// <https://opengrind.org/grindr-api/> and the dev tool at
@@ -404,7 +406,8 @@ impl GrindrClient {
     /// `body` accepts anything convertible to [`Bytes`]; a `Vec<u8>` converts
     /// without copying. Non-success statuses come back as a normal
     /// [`RawResponse`]; map them with [`GrindrError::from_response`] to get the
-    /// same errors the crate's typed methods return.
+    /// same errors the crate's typed methods return. A Cloudflare block page
+    /// turns into [`GrindrError::Blocked`].
     pub async fn request_authenticated_bytes(
         &self,
         method: Method,

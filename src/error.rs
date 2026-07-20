@@ -45,6 +45,12 @@ pub enum GrindrError {
     #[error("rate limited")]
     RateLimited,
 
+    /// Cloudflare blocked the request before it reached Grindr: a `403` with
+    /// the "Sorry, you have been blocked" page, usually because it didn't like
+    /// the TLS/HTTP fingerprint. Retrying the same request won't get past it.
+    #[error("blocked by Cloudflare")]
+    Blocked,
+
     /// A request argument was malformed, e.g. a path that does not begin with
     /// `/` and could therefore repoint the request to a different host.
     #[error("invalid request: {0}")]

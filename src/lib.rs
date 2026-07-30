@@ -56,15 +56,19 @@ mod signing;
 mod ws;
 
 pub use auth::{
-    AuthEvent, BanDetails, LoginResult, Restriction, Session, SessionKind, VerificationRegion,
+	AuthEvent, BanDetails, LoginResult, Restriction, Session, SessionKind,
+	VerificationRegion,
 };
 pub use client::{probe_emulation, GrindrClient};
 pub use device::DeviceInfo;
 pub use error::{BanInfo, BanKind, GrindrError};
-pub use headers::{build_device_info_header, build_user_agent, GrindrHeaders, APP_VERSION};
+pub use headers::{
+	build_device_info_header, build_user_agent, GrindrHeaders, APP_VERSION,
+};
 pub use rest::RawResponse;
 pub use signing::{
-    DeviceSigningKey, MediaUploadResponse, UploadProfileImageResponse, UploadedProfileImage,
+	DeviceSigningKey, MediaUploadResponse, UploadProfileImageResponse,
+	UploadedProfileImage,
 };
 pub use ws::{WsCommand, WsConnectionState, WsEvent};
 

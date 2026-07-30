@@ -22,7 +22,7 @@ const WS_BROADCAST_CAPACITY: usize = 256;
 /// The client adds the session token; you set `type`, `ref_id`, and `payload`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WsCommand {
-	/// Command type, e.g. `"chat.v1.message"`.
+	/// Command type, e.g. `"chat.v1.message.send"`.
 	pub r#type: String,
 	/// Your id for this command, echoed back in the reply.
 	pub ref_id: String,

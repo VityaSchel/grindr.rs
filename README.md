@@ -23,7 +23,7 @@ This crate is a transport: it handles authentication, fingerprinting, connection
 
 ```toml
 [dependencies]
-grindr = "0.1"
+grindr = "0.7"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 serde_json = "1"
 ```
@@ -97,7 +97,7 @@ tokio::spawn(async move {
 client
     .ws_sender()
     .send(WsCommand {
-        r#type: "chat.v1.typing".to_owned(),
+        r#type: "chat.v1.typing_status".to_owned(),
         ref_id: "1".to_owned(),
         payload: serde_json::json!({ "conversationId": "abc" }),
     })
@@ -113,37 +113,106 @@ Full generated docs: <https://docs.rs/grindr>.
 
 ### `GrindrClient`
 
-| Method                                                                 | Description                                                                    |
-| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `new(device, session) -> Result<Self>`                                 | Create a client, optionally resuming a stored `Session`                        |
-| `login(email, password) -> Result<LoginResult>`                        | Email + password login                                                         |
-| `google_sign_in(access_token) -> Result<LoginResult>`                  | Google OAuth sign-in                                                           |
-| `refresh_token() -> Result<LoginResult>`                               | Force token refresh                                                            |
-| `logout()`                                                             | Clear the session and disconnect the websocket                                 |
-| `request_authenticated_raw(method, path, body) -> Result<RawResponse>` | Authenticated API call returning the raw status + body                         |
-| `request_authenticated_bytes(method, path, content_type, body) -> Result<RawResponse>` | Like `request_authenticated_raw`, but with a raw binary body (e.g. media uploads) |
-| `rotate_device(device) -> Result<DeviceInfo>`                          | Set the device identity in place, keeping the session; returns old device info |
-| `current_device() -> DeviceInfo`                                       | Get the device identity currently in use                                       |
-| `recaptcha_first_party_enabled() -> Result<bool>`                      | Check whether first-party reCAPTCHA is enabled                                 |
-| `session_receiver() -> watch::Receiver<Option<Session>>`               | Watch the current session (updates on login/refresh/logout)                    |
-| `connection_state() -> watch::Receiver<WsConnectionState>`             | Watch the websocket connection state                                           |
-| `ws_receiver() -> broadcast::Receiver<WsEvent>`                        | Subscribe to websocket events                                                  |
-| `ws_sender() -> mpsc::Sender<WsCommand>`                               | Get websocket sender for commands                                              |
-| `connect()`                                                            | Opt in to the realtime websocket and start the shared background task          |
-| `auth_event_receiver() -> broadcast::Receiver<AuthEvent>`              | Subscribe to background token refresh failures                                 |
+All methods are `async` except `new`, `signing_key_receiver`, `session_receiver`, `auth_event_receiver`, `connection_state`, `ws_receiver` and `ws_sender`.
+
+#### Setup and device identity
+
+| Method                                            | Description                                                                            |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `new(device, session) -> Result<Self>`            | Create a client, optionally resuming a stored `Session`. Sync, needs no runtime        |
+| `current_device() -> DeviceInfo`                  | The device identity currently in use                                                   |
+| `rotate_device(device) -> Result<DeviceInfo>`     | Swap the device identity and transport, keeping the session; returns the old device    |
+| `sign_out_rotating(device) -> Result<DeviceInfo>` | `logout()` then `rotate_device()`, so the next login can't be correlated with this one |
+
+#### Authentication
+
+| Method                                                                      | Description                                                     |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `login(email, password) -> Result<LoginResult>`                             | Email + password login                                          |
+| `login_with_geohash(email, password, geohash) -> Result<LoginResult>`       | Like `login`, tagging the sign-in with an approximate location  |
+| `google_sign_in(access_token) -> Result<LoginResult>`                       | Google OAuth sign-in                                            |
+| `google_sign_in_with_geohash(access_token, geohash) -> Result<LoginResult>` | Like `google_sign_in`, with a geohash                           |
+| `refresh_token() -> Result<LoginResult>`                                    | Force a token refresh (happens automatically otherwise)         |
+| `refresh_token_with_geohash(geohash) -> Result<LoginResult>`                | Like `refresh_token`, with a geohash                            |
+| `logout()`                                                                  | Clear the session and signing key, and close the websocket      |
+| `recaptcha_first_party_enabled() -> Result<bool>`                           | Whether the server has first-party reCAPTCHA on. No auth needed |
+
+Only the initial request carries a `geohash`; automatic background refreshes never do.
+
+#### Requests
+
+| Method                                                                                 | Description                                                      |
+| -------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `request_authenticated_raw(method, path, body) -> Result<RawResponse>`                 | Authenticated JSON call returning the raw status + body          |
+| `request_authenticated_bytes(method, path, content_type, body) -> Result<RawResponse>` | Same, with a raw binary body                                     |
+| `request_signed_bytes(method, path, content_type, body) -> Result<RawResponse>`        | Same, plus device-key signing — for upload paths that require it |
+
+`path` must start with `/`, otherwise you get `GrindrError::InvalidRequest`.
+
+#### Media uploads
+
+Signed uploads register an ephemeral P-256 device key on first use. Persist it to avoid re-registering.
+
+| Method                                                                                                    | Description                              |
+| --------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `upload_profile_image(jpeg, thumb_coords, taken_on_grindr) -> Result<UploadProfileImageResponse>`         | Signed `POST /v5/media/upload`           |
+| `upload_chat_media(bytes, content_type, length, looping, taken_on_grindr) -> Result<MediaUploadResponse>` | Signed `POST /v6/chat/media/upload`      |
+| `restore_signing_key(key)`                                                                                | Restore a persisted `DeviceSigningKey`   |
+| `signing_key_receiver() -> watch::Receiver<Option<DeviceSigningKey>>`                                     | Watch the signing key so you can save it |
+
+#### Realtime websocket
+
+| Method                                                     | Description                                                  |
+| ---------------------------------------------------------- | ------------------------------------------------------------ |
+| `connect()`                                                | Opt in to the websocket and start the shared background task |
+| `ws_receiver() -> broadcast::Receiver<WsEvent>`            | Subscribe to websocket events                                |
+| `ws_sender() -> mpsc::Sender<WsCommand>`                   | Sender for websocket commands                                |
+| `connection_state() -> watch::Receiver<WsConnectionState>` | Watch the websocket connection state                         |
+
+#### Watching session state
+
+| Method                                                    | Description                                                 |
+| --------------------------------------------------------- | ----------------------------------------------------------- |
+| `session_receiver() -> watch::Receiver<Option<Session>>`  | Watch the current session (updates on login/refresh/logout) |
+| `auth_event_receiver() -> broadcast::Receiver<AuthEvent>` | Subscribe to background token refresh failures              |
 
 ### Types
 
+Everything under **Identity and session** and **Requests and errors** — except `RawResponse` — is `#[non_exhaustive]`, so match those enums with a wildcard arm. The **Uploads** and **Websocket** types are ordinary.
+
+**Identity and session**
+
 - `DeviceInfo` — device identity, build with `DeviceInfo::generate()` or `DeviceInfo::default()`
-- `Session` — session token and other secrets
+- `Session` — session token and other secrets. `Debug` redacts the credentials
 - `SessionKind` — `Email` or `Google`
-- `LoginResult` — `{ profile_id }`, returned by the auth methods
+- `LoginResult` — `{ profile_id, restriction }`, returned by the auth methods
+- `Restriction` — account restriction from the session JWT, the session is still valid: `AgeVerification { region, reason }` / `TimedBan(BanDetails)` / `TrustVendorRejected` / `Other(String)`
+- `VerificationRegion` — `Uk` / `Br` / `Au` / `Other`
+- `BanDetails` — `{ expiry_time, reason, sub_reason, is_automated }`
+
+**Requests and errors**
+
 - `RawResponse` — `{ status: u16, body: Vec<u8> }`
+- `GrindrError` — the crate error type (`Http`, `Auth`, `Api`, `Unauthorized`, `Banned`, `RateLimited`, `Blocked`, `InvalidRequest`); `GrindrError::from_response(status, body)` maps a non-success `RawResponse` the same way the typed methods do
+- `BanInfo` — `{ kind, code, message, reason, sub_reason, automated }`
+- `BanKind` — `Profile` / `Device` / `Network` / `Underage`
+- `AuthEvent` — `LoggedOut` / `Banned(BanInfo)` / `RefreshFailed { message }` from background refreshes
+
+**Uploads**
+
+- `DeviceSigningKey` — persistable P-256 upload signing key, scoped to one account and device
+- `UploadProfileImageResponse` — `{ hash, image_sizes }`
+- `UploadedProfileImage` — `{ media_hash, full_url, state, thumbnail, size }`
+- `MediaUploadResponse` — `{ media_id, url, media_hash }`
+
+**Websocket**
+
 - `WsCommand` — websocket command `{ type, ref_id, payload }`
 - `WsEvent` — websocket event `{ event_type, payload }`
 - `WsConnectionState` — `Connected` / `Disconnected`
-- `AuthEvent` — `{ message, unauthorized }` from background refreshes
-- `GrindrError` — the crate error type (`Http`, `Auth`, `Api`, `Unauthorized`, `InvalidRequest`); `GrindrError::from_response(status, body)` maps a non-success `RawResponse` the same way the typed methods do
+
+**Re-exports**
+
 - `Method` — re-exported `wreq::Method` for `request_authenticated_raw`
 - `Bytes` — re-exported `bytes::Bytes` for `request_authenticated_bytes`
 
@@ -155,6 +224,7 @@ For building your own `wreq::Client` with an identical fingerprint:
 - `build_user_agent(device, tier) -> String` — `User-Agent` value
 - `build_device_info_header(device) -> String` — `L-Device-Info` value
 - `GrindrHeaders::build(device, ua, authorization, roles)` — full and correctly ordered headers list
+- `APP_VERSION` — the Grindr APK version this crate emulates
 
 ## Examples
 

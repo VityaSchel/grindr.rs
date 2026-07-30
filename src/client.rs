@@ -442,7 +442,7 @@ impl GrindrClient {
 
 	/// Like [`request_authenticated_raw`](Self::request_authenticated_raw), but
 	/// sends a raw binary body with the given `Content-Type` instead of JSON —
-	/// for endpoints like `POST /v5/chat/media/upload` that take the file bytes
+	/// for endpoints like `POST /v6/chat/media/upload` that take the file bytes
 	/// as the body.
 	///
 	/// `body` accepts anything convertible to [`Bytes`]; a `Vec<u8>` converts
@@ -609,7 +609,7 @@ mod tests {
 		let err = client
 			.request_authenticated_bytes(
 				Method::POST,
-				"/v5/chat/media/upload?takenOnGrindr=false",
+				"/v6/chat/media/upload?takenOnGrindr=false",
 				"image/jpeg",
 				vec![0xFF, 0xD8],
 			)

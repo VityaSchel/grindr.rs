@@ -413,18 +413,32 @@ pub(crate) fn is_cloudflare_block(status: u16, body: &[u8]) -> bool {
 		&& text.contains("Sorry, you have been blocked")
 }
 
+/// Cloudflare's "Just a moment..." browser challenge.
+pub(crate) fn is_cloudflare_challenge(status: u16, body: &[u8]) -> bool {
+	if (200..300).contains(&status) {
+		return false;
+	}
+	let text = String::from_utf8_lossy(body);
+	text.contains("_cf_chl_opt")
+		|| text.contains("/cdn-cgi/challenge-platform/")
+}
+
+pub(crate) fn is_cloudflare_interstitial(status: u16, body: &[u8]) -> bool {
+	is_cloudflare_block(status, body) || is_cloudflare_challenge(status, body)
+}
+
 fn raw_or_blocked(
 	status: u16,
 	body: Vec<u8>,
 ) -> Result<RawResponse, GrindrError> {
-	if is_cloudflare_block(status, &body) {
+	if is_cloudflare_interstitial(status, &body) {
 		return Err(GrindrError::Blocked);
 	}
 	Ok(RawResponse { status, body })
 }
 
 pub(crate) fn parse_api_error(bytes: &[u8], http_status: u16) -> GrindrError {
-	if is_cloudflare_block(http_status, bytes) {
+	if is_cloudflare_interstitial(http_status, bytes) {
 		return GrindrError::Blocked;
 	}
 
@@ -583,6 +597,79 @@ mod tests {
 			403,
 			b"<title>Attention Required! | Cloudflare</title>"
 		));
+	}
+
+	const CLOUDFLARE_CHALLENGE_PAGE: &[u8] = br#"<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title><meta http-equiv="refresh" content="360"></head><body><div class="main-wrapper" role="main"><noscript><span id="challenge-error-text">Enable JavaScript and cookies to continue</span></noscript></div><script nonce="UWPAt20YJwDjVxfZvpSJVX">(function(){window._cf_chl_opt = {cRay: 'a1fbdcf40dd6851a',cType: 'interactive',cZone: 'grindr.mobi'};var a = document.createElement('script');a.src = '/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=a1fbdcf40dd6851a';document.getElementsByTagName('head')[0].appendChild(a);}());</script></body></html>"#;
+
+	#[test]
+	fn from_response_maps_cloudflare_challenge_to_blocked() {
+		let err = GrindrError::from_response(403, CLOUDFLARE_CHALLENGE_PAGE);
+		assert!(matches!(err, GrindrError::Blocked), "got {err:?}");
+	}
+
+	#[test]
+	fn challenge_is_detected_on_every_status_cloudflare_uses() {
+		for status in [403, 429, 503] {
+			assert!(
+				is_cloudflare_challenge(status, CLOUDFLARE_CHALLENGE_PAGE),
+				"expected {status} challenge to be detected"
+			);
+			assert!(matches!(
+				GrindrError::from_response(status, CLOUDFLARE_CHALLENGE_PAGE),
+				GrindrError::Blocked
+			));
+		}
+	}
+
+	#[test]
+	fn either_challenge_marker_alone_is_conclusive() {
+		assert!(is_cloudflare_challenge(
+			403,
+			b"<html><script>window._cf_chl_opt = {};</script></html>"
+		));
+		assert!(is_cloudflare_challenge(
+			403,
+			b"<html><script src='/cdn-cgi/challenge-platform/h/b/x'></script></html>"
+		));
+		// The title alone is localized, so it is deliberately not a marker
+		assert!(!is_cloudflare_challenge(
+			403,
+			b"<html><head><title>Just a moment...</title></head></html>"
+		));
+	}
+
+	#[test]
+	fn challenge_check_skips_successful_responses() {
+		assert!(!is_cloudflare_challenge(200, CLOUDFLARE_CHALLENGE_PAGE));
+		assert!(!is_cloudflare_challenge(204, CLOUDFLARE_CHALLENGE_PAGE));
+		assert!(is_cloudflare_challenge(403, CLOUDFLARE_CHALLENGE_PAGE));
+	}
+
+	#[test]
+	fn challenge_check_leaves_grindr_error_bodies_alone() {
+		for body in [
+			&br#"{"code":28,"message":"ACCOUNT_BANNED"}"#[..],
+			&br#"{"code":4,"message":"Media not allowed"}"#[..],
+			b"Bad Gateway",
+			b"",
+		] {
+			assert!(!is_cloudflare_challenge(403, body));
+			assert!(!is_cloudflare_challenge(429, body));
+		}
+		assert!(matches!(
+			GrindrError::from_response(429, b"{}"),
+			GrindrError::RateLimited
+		));
+	}
+
+	#[test]
+	fn raw_or_blocked_rejects_both_interstitials() {
+		for page in [CLOUDFLARE_BLOCK_PAGE, CLOUDFLARE_CHALLENGE_PAGE] {
+			let err = raw_or_blocked(403, page.to_vec()).unwrap_err();
+			assert!(matches!(err, GrindrError::Blocked), "got {err:?}");
+		}
+		let ok = raw_or_blocked(403, b"{\"code\":4}".to_vec()).unwrap();
+		assert_eq!(ok.status, 403);
 	}
 
 	#[test]

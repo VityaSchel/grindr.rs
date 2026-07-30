@@ -15,7 +15,7 @@ Unofficial async Rust client for the Grindr API, powering [Open Grind](https://o
 - Fingerprint matching Grindr's official Android APK's network lib: TLS (JA3/JA4), HTTP/2 (frames, pseudoheaders), required headers
 - Session handling — tokens are refreshed automatically
 - Background WebSocket with automatic reconnect and states callback
-- Device identities spoofing — store DeviceInfo along session token to decrease the chance of triggering Cloudflare block pages
+- Device identities spoofing — store DeviceInfo along session token to decrease the chance of triggering Cloudflare block and challenge pages
 
 This crate is a transport: it handles authentication, fingerprinting, connection, but does not ship typed models for every endpoint. You choose the path and deserialize the body yourself.
 

@@ -45,9 +45,14 @@ pub enum GrindrError {
 	#[error("rate limited")]
 	RateLimited,
 
-	/// Cloudflare blocked the request before it reached Grindr: a `403` with
-	/// the "Sorry, you have been blocked" page, usually because it didn't like
-	/// the TLS/HTTP fingerprint. Retrying the same request won't get past it.
+	/// Cloudflare answered before the request reached Grindr, with either the
+	/// "Sorry, you have been blocked" page or a "Just a moment..." browser
+	/// challenge — usually because it didn't like the TLS/HTTP fingerprint.
+	///
+	/// Often transient: retrying the same request sometimes gets through, so
+	/// this is worth a backoff-and-retry rather than treating it as terminal.
+	/// If it persists, rotate the device identity with
+	/// [`rotate_device`](crate::GrindrClient::rotate_device).
 	#[error("blocked by Cloudflare")]
 	Blocked,
 

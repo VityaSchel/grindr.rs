@@ -60,6 +60,10 @@ pub enum GrindrError {
 	/// `/` and could therefore repoint the request to a different host.
 	#[error("invalid request: {0}")]
 	InvalidRequest(String),
+
+	/// Signed out while this request was in flight
+	#[error("session was cleared while the request was in flight")]
+	SessionCleared,
 }
 
 /// What a [`GrindrError::Banned`] applies to, from the error code in the body.

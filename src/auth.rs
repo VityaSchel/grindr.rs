@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -288,6 +289,7 @@ pub enum AuthEvent {
 
 pub(crate) struct AuthState {
 	pub session: RwLock<Option<Session>>,
+	pub logout_epoch: AtomicU64,
 	pub refresh_lock: Mutex<()>,
 	pub session_tx: watch::Sender<Option<Session>>,
 	pub auth_event_tx: broadcast::Sender<AuthEvent>,
@@ -301,6 +303,7 @@ impl AuthState {
 		let (auth_event_tx, _) = broadcast::channel(16);
 		let state = Self {
 			session: RwLock::new(initial),
+			logout_epoch: AtomicU64::new(0),
 			refresh_lock: Mutex::new(()),
 			session_tx: tx,
 			auth_event_tx,
@@ -308,13 +311,28 @@ impl AuthState {
 		(state, rx)
 	}
 
-	pub async fn set_session(&self, session: Session) {
-		*self.session.write().await = Some(session.clone());
+	pub fn epoch(&self) -> u64 {
+		self.logout_epoch.load(Ordering::SeqCst)
+	}
+
+	pub async fn set_session_if_current(
+		&self,
+		session: Session,
+		epoch: u64,
+	) -> bool {
+		let mut guard = self.session.write().await;
+		if self.epoch() != epoch {
+			return false;
+		}
+		*guard = Some(session.clone());
 		let _ = self.session_tx.send(Some(session));
+		true
 	}
 
 	pub async fn clear_session(&self) {
-		*self.session.write().await = None;
+		let mut guard = self.session.write().await;
+		self.logout_epoch.fetch_add(1, Ordering::SeqCst);
+		*guard = None;
 		let _ = self.session_tx.send(None);
 	}
 }
@@ -356,11 +374,14 @@ pub(crate) async fn login_email(
 		token: None,
 		geohash: geohash.map(str::to_owned),
 	};
+	let epoch = auth.epoch();
 	let session =
 		create_session(inner, &body, SessionKind::Email, None).await?;
 	let profile_id = session.profile_id.clone();
 	let restriction = session.restriction.clone();
-	auth.set_session(session).await;
+	if !auth.set_session_if_current(session, epoch).await {
+		return Err(GrindrError::SessionCleared);
+	}
 	Ok(LoginResult {
 		profile_id,
 		restriction,
@@ -373,6 +394,7 @@ pub(crate) async fn google_sign_in(
 	google_access_token: &str,
 	geohash: Option<&str>,
 ) -> Result<LoginResult, GrindrError> {
+	let epoch = auth.epoch();
 	let body = ThirdPartySignInRequest {
 		third_party_vendor: 2,
 		third_party_token: google_access_token,
@@ -392,7 +414,9 @@ pub(crate) async fn google_sign_in(
 	let session = session_from_third_party(tp, fallback_email)?;
 	let profile_id = session.profile_id.clone();
 	let restriction = session.restriction.clone();
-	auth.set_session(session).await;
+	if !auth.set_session_if_current(session, epoch).await {
+		return Err(GrindrError::SessionCleared);
+	}
 	Ok(LoginResult {
 		profile_id,
 		restriction,
@@ -446,7 +470,7 @@ pub(crate) async fn refresh_token(
 	auth: &AuthState,
 	geohash: Option<&str>,
 ) -> Result<LoginResult, GrindrError> {
-	let (kind, email, auth_token, third_party_user_id) = {
+	let (kind, email, auth_token, third_party_user_id, epoch) = {
 		let guard = auth.session.read().await;
 		let s = guard
 			.as_ref()
@@ -456,6 +480,7 @@ pub(crate) async fn refresh_token(
 			s.email.clone(),
 			s.auth_token.clone(),
 			s.third_party_user_id.clone(),
+			auth.epoch(),
 		)
 	};
 
@@ -488,7 +513,9 @@ pub(crate) async fn refresh_token(
 
 	let profile_id = session.profile_id.clone();
 	let restriction = session.restriction.clone();
-	auth.set_session(session).await;
+	if !auth.set_session_if_current(session, epoch).await {
+		return Err(GrindrError::SessionCleared);
+	}
 	Ok(LoginResult {
 		profile_id,
 		restriction,
@@ -595,6 +622,51 @@ mod tests {
 	// Header {"alg":"HS256","typ":"JWT"} . payload {"exp":9999999999} . sig
 	const JWT: &str =
 		"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjk5OTk5OTk5OTl9.sig";
+
+	fn session_named(email: &str) -> Session {
+		Session {
+			email: email.to_owned(),
+			expires_at: 9_999_999_999,
+			profile_id: "42".to_owned(),
+			session_id: JWT.to_owned(),
+			auth_token: "auth-tok".to_owned(),
+			kind: SessionKind::Email,
+			third_party_user_id: None,
+			restriction: None,
+		}
+	}
+
+	#[tokio::test]
+	async fn a_session_minted_before_a_sign_out_is_refused() {
+		let (auth, mut rx) = AuthState::new(Some(session_named("old@x")));
+		let epoch = auth.epoch();
+
+		auth.clear_session().await;
+
+		assert!(
+			!auth.set_session_if_current(session_named("old@x"), epoch).await,
+			"a refresh in flight across sign-out must not resurrect the account"
+		);
+		assert!(auth.session.read().await.is_none());
+		assert!(
+			rx.borrow_and_update().is_none(),
+			"the watch must not be left holding a stale session for the app to persist"
+		);
+	}
+
+	#[tokio::test]
+	async fn a_session_minted_after_a_sign_out_is_accepted() {
+		let (auth, _rx) = AuthState::new(Some(session_named("old@x")));
+		auth.clear_session().await;
+
+		let epoch = auth.epoch();
+		assert!(
+			auth.set_session_if_current(session_named("new@x"), epoch)
+				.await,
+			"signing in again after a sign-out must work"
+		);
+		assert_eq!(auth.session.read().await.as_ref().unwrap().email, "new@x");
+	}
 
 	fn third_party_session(show: Option<&str>) -> ThirdPartySession {
 		ThirdPartySession {

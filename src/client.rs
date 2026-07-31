@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex, Once};
+use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::sync::{broadcast, mpsc, watch};
@@ -114,6 +115,10 @@ pub fn probe_emulation() -> EmulationProvider {
 	grindr_emulation()
 }
 
+/// okhttp's defaults
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Shared `wreq` setup: the emulation profile plus gzip-only encoding.
 fn grindr_client_builder() -> wreq::ClientBuilder {
 	Client::builder()
@@ -122,10 +127,14 @@ fn grindr_client_builder() -> wreq::ClientBuilder {
 		.no_deflate()
 		.no_brotli()
 		.no_zstd()
+		.connect_timeout(CONNECT_TIMEOUT)
 }
 
 fn build_http_client() -> Result<Client, GrindrError> {
-	grindr_client_builder().build().map_err(Into::into)
+	grindr_client_builder()
+		.read_timeout(READ_TIMEOUT)
+		.build()
+		.map_err(Into::into)
 }
 
 fn build_ws_client() -> Result<Client, GrindrError> {

@@ -16,13 +16,21 @@ use crate::signing::{
 	signing_reject, DeviceKey, DeviceSigningKey, SigningReject,
 };
 
-pub(crate) const BASE_URL: &str = "https://grindr.mobi";
+#[cfg(not(test))]
+pub(crate) fn base_url() -> &'static str {
+	"https://grindr.mobi"
+}
+
+#[cfg(test)]
+pub(crate) fn base_url() -> &'static str {
+	crate::testserver::base_url()
+}
 
 /// Guards against a `path` that would change the effective host once
-/// concatenated onto [`BASE_URL`].
+/// concatenated onto [`base_url`].
 ///
-/// `format!("{BASE_URL}{path}")` keeps the request on `grindr.mobi` only when
-/// `path` starts with `/`.
+/// `format!("{}{path}", base_url())` keeps the request on `grindr.mobi` only
+/// when `path` starts with `/`.
 fn validate_path(path: &str) -> Result<(), GrindrError> {
 	if path.starts_with('/') {
 		Ok(())
@@ -90,10 +98,23 @@ impl InnerClient {
 		let _ = self.signing_key_tx.send(None);
 	}
 
-	pub async fn restore_signing_key(&self, key: DeviceSigningKey) {
-		if let Some(device_key) = DeviceKey::from_stored(&key) {
-			*self.signing.lock().await = Some(device_key);
-			let _ = self.signing_key_tx.send(Some(key));
+	pub async fn restore_signing_key(
+		&self,
+		auth: &AuthState,
+		key: DeviceSigningKey,
+	) -> bool {
+		let known_user_id =
+			session_user_id(auth).await.ok().filter(|id| !id.is_empty());
+		if known_user_id.is_some_and(|id| id != key.user_id()) {
+			return false;
+		}
+		match DeviceKey::from_stored(&key) {
+			Some(device_key) => {
+				*self.signing.lock().await = Some(device_key);
+				let _ = self.signing_key_tx.send(Some(key));
+				true
+			}
+			None => false,
 		}
 	}
 
@@ -129,6 +150,20 @@ impl InnerClient {
 		req
 	}
 
+	fn apply_body(
+		req: RequestBuilder,
+		body: Option<&RequestBody>,
+	) -> RequestBuilder {
+		match body {
+			Some(RequestBody::Json(b)) => req.json(b),
+			Some(RequestBody::Raw {
+				content_type,
+				bytes,
+			}) => req.header("content-type", content_type).body(bytes.clone()),
+			None => req,
+		}
+	}
+
 	pub async fn request_no_auth<TReq, TResp>(
 		&self,
 		method: Method,
@@ -145,7 +180,7 @@ impl InnerClient {
 			GrindrHeaders::build(&fp.device, &fp.user_agent, None, None)?;
 
 		let mut req = Self::apply_headers(
-			fp.http.request(method, format!("{BASE_URL}{path}")),
+			fp.http.request(method, format!("{}{path}", base_url())),
 			&headers.items,
 		);
 		if let Some(b) = body {
@@ -160,6 +195,33 @@ impl InnerClient {
 			return Err(parse_api_error(&bytes, status));
 		}
 		resp.json::<TResp>().await.map_err(Into::into)
+	}
+
+	pub async fn request_no_auth_raw(
+		&self,
+		method: Method,
+		path: &str,
+		body: Option<RequestBody>,
+	) -> Result<RawResponse, GrindrError> {
+		validate_path(path)?;
+
+		let fp = self.fingerprint().await;
+		let headers =
+			GrindrHeaders::build(&fp.device, &fp.user_agent, None, None)?;
+
+		let req = Self::apply_body(
+			Self::apply_headers(
+				fp.http.request(method, format!("{}{path}", base_url())),
+				&headers.items,
+			),
+			body.as_ref(),
+		);
+
+		let resp = req.send().await?;
+		self.note_server_date(resp.headers());
+		let status = resp.status().as_u16();
+		let body_bytes = resp.bytes().await?.to_vec();
+		raw_or_blocked(status, body_bytes)
 	}
 
 	pub async fn request_authenticated(
@@ -191,22 +253,16 @@ impl InnerClient {
 				Some("[FREE]"),
 			)?;
 
-			let mut req = Self::apply_headers(
-				fp.http.request(method.clone(), format!("{BASE_URL}{path}")),
-				&headers.items,
+			let req = Self::apply_body(
+				Self::apply_headers(
+					fp.http.request(
+						method.clone(),
+						format!("{}{path}", base_url()),
+					),
+					&headers.items,
+				),
+				body.as_ref(),
 			);
-			match &body {
-				Some(RequestBody::Json(b)) => req = req.json(b),
-				Some(RequestBody::Raw {
-					content_type,
-					bytes,
-				}) => {
-					req = req
-						.header("content-type", content_type)
-						.body(bytes.clone())
-				}
-				None => {}
-			}
 
 			let resp = req.send().await?;
 			self.note_server_date(resp.headers());
@@ -252,11 +308,28 @@ impl InnerClient {
 			.map_err(|e| GrindrError::Http(e.to_string()))
 	}
 
+	/// Refreshes first, so the blank profile id a token-resumed session starts
+	/// with is filled in before a key binds to it.
+	async fn signing_user_id(
+		&self,
+		auth: &AuthState,
+	) -> Result<String, GrindrError> {
+		crate::auth::authorization_header(self, auth)
+			.await
+			.ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))?;
+		match session_user_id(auth).await? {
+			id if id.is_empty() => Err(GrindrError::Auth(
+				"session has no profile id to bind a device key to".to_owned(),
+			)),
+			id => Ok(id),
+		}
+	}
+
 	async fn ensure_device_key(
 		&self,
 		auth: &AuthState,
 	) -> Result<(), GrindrError> {
-		let user_id = session_user_id(auth).await?;
+		let user_id = self.signing_user_id(auth).await?;
 		let mut guard = self.signing.lock().await;
 		if guard.as_ref().is_some_and(|k| k.user_id() == user_id) {
 			return Ok(());
@@ -347,7 +420,8 @@ impl InnerClient {
 				Some("[FREE]"),
 			)?;
 			let req = Self::apply_headers(
-				fp.http.request(method.clone(), format!("{BASE_URL}{path}")),
+				fp.http
+					.request(method.clone(), format!("{}{path}", base_url())),
 				&headers.items,
 			)
 			.header("x-key-id", &signature.key_id)
@@ -402,15 +476,16 @@ async fn session_user_id(auth: &AuthState) -> Result<String, GrindrError> {
 
 const MAX_ERROR_BODY: usize = 1024;
 
-/// `403` carrying Cloudflare's "you have been blocked" page instead of a
-/// Grindr response body.
-pub(crate) fn is_cloudflare_block(status: u16, body: &[u8]) -> bool {
+/// A `403` whose body isn't JSON: a Cloudflare block page, a WAF custom
+/// response, or an intercepting proxy answered instead of the API. Scoped to
+/// `403` — an HTML `502` is a plain upstream failure, not a block.
+pub(crate) fn is_edge_block(status: u16, body: &[u8]) -> bool {
 	if status != 403 {
 		return false;
 	}
-	let text = String::from_utf8_lossy(body);
-	text.contains("<title>Attention Required! | Cloudflare</title>")
-		&& text.contains("Sorry, you have been blocked")
+	let body = body.trim_ascii();
+	!body.is_empty()
+		&& serde_json::from_slice::<serde_json::Value>(body).is_err()
 }
 
 /// Cloudflare's "Just a moment..." browser challenge.
@@ -423,22 +498,22 @@ pub(crate) fn is_cloudflare_challenge(status: u16, body: &[u8]) -> bool {
 		|| text.contains("/cdn-cgi/challenge-platform/")
 }
 
-pub(crate) fn is_cloudflare_interstitial(status: u16, body: &[u8]) -> bool {
-	is_cloudflare_block(status, body) || is_cloudflare_challenge(status, body)
+pub(crate) fn is_edge_interstitial(status: u16, body: &[u8]) -> bool {
+	is_edge_block(status, body) || is_cloudflare_challenge(status, body)
 }
 
 fn raw_or_blocked(
 	status: u16,
 	body: Vec<u8>,
 ) -> Result<RawResponse, GrindrError> {
-	if is_cloudflare_interstitial(status, &body) {
+	if is_edge_interstitial(status, &body) {
 		return Err(GrindrError::Blocked);
 	}
 	Ok(RawResponse { status, body })
 }
 
 pub(crate) fn parse_api_error(bytes: &[u8], http_status: u16) -> GrindrError {
-	if is_cloudflare_interstitial(http_status, bytes) {
+	if is_edge_interstitial(http_status, bytes) {
 		return GrindrError::Blocked;
 	}
 
@@ -507,6 +582,56 @@ fn extract_api_error(bytes: &[u8], http_status: u16) -> (i32, String) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::auth::Session;
+	use crate::GrindrClient;
+
+	fn session_for(profile_id: &str) -> Session {
+		let mut session = Session::from_auth_token("a@b.c", "auth-tok");
+		session.profile_id = profile_id.to_owned();
+		session
+	}
+
+	fn client_signed_in_as(profile_id: &str) -> GrindrClient {
+		GrindrClient::new(DeviceInfo::generate(), Some(session_for(profile_id)))
+			.unwrap()
+	}
+
+	async fn restored_key_user_id(client: &GrindrClient) -> Option<String> {
+		client
+			.signing_key_receiver()
+			.borrow()
+			.as_ref()
+			.map(|k| k.user_id().to_owned())
+	}
+
+	#[tokio::test]
+	async fn a_signing_key_from_another_account_is_refused() {
+		let client = client_signed_in_as("42");
+		let foreign = DeviceKey::generate("99".to_owned()).export();
+
+		assert!(!client.restore_signing_key(foreign).await);
+		assert!(
+			restored_key_user_id(&client).await.is_none(),
+			"a refused key must not reach the signing slot or the watch"
+		);
+	}
+
+	#[tokio::test]
+	async fn a_signing_key_is_restored_for_its_own_account() {
+		let client = client_signed_in_as("42");
+		let own = DeviceKey::generate("42".to_owned()).export();
+
+		assert!(client.restore_signing_key(own).await);
+		assert_eq!(restored_key_user_id(&client).await.as_deref(), Some("42"));
+	}
+
+	#[tokio::test]
+	async fn a_token_resumed_session_accepts_a_key_before_its_first_refresh() {
+		let client = client_signed_in_as("");
+		let key = DeviceKey::generate("42".to_owned()).export();
+
+		assert!(client.restore_signing_key(key).await);
+	}
 
 	#[test]
 	fn accepts_absolute_paths() {
@@ -585,18 +710,49 @@ mod tests {
 		assert!(matches!(err, GrindrError::Blocked), "got {err:?}");
 	}
 
+	/// A WAF custom response: a block that carries none of the markers the
+	/// classic interstitial does.
+	const WAF_CUSTOM_BLOCK_PAGE: &[u8] =
+		br#"<!DOCTYPE html><html><head><title>Access denied</title></head><body><h1>Request rejected</h1><p>Error code 1020</p></body></html>"#;
+
 	#[test]
-	fn cloudflare_block_needs_403_and_both_markers() {
-		assert!(is_cloudflare_block(403, CLOUDFLARE_BLOCK_PAGE));
-		assert!(!is_cloudflare_block(503, CLOUDFLARE_BLOCK_PAGE));
-		assert!(!is_cloudflare_block(
-			403,
-			br#"{"code":28,"message":"ACCOUNT_BANNED"}"#
-		));
-		assert!(!is_cloudflare_block(
-			403,
-			b"<title>Attention Required! | Cloudflare</title>"
-		));
+	fn edge_block_catches_any_non_json_403() {
+		for page in [
+			CLOUDFLARE_BLOCK_PAGE,
+			CLOUDFLARE_CHALLENGE_PAGE,
+			WAF_CUSTOM_BLOCK_PAGE,
+			b"<title>Attention Required! | Cloudflare</title>",
+			b"Forbidden",
+		] {
+			assert!(is_edge_block(403, page), "expected a block for {page:?}");
+			assert!(matches!(
+				GrindrError::from_response(403, page),
+				GrindrError::Blocked
+			));
+		}
+	}
+
+	#[test]
+	fn edge_block_leaves_api_answered_403s_alone() {
+		for body in [
+			&br#"{"code":28,"message":"ACCOUNT_BANNED"}"#[..],
+			&br#"{"type":"urn:gr:err:unauthorized_action","status":403}"#[..],
+			b"",
+			b"   ",
+		] {
+			assert!(!is_edge_block(403, body), "unexpected block for {body:?}");
+		}
+	}
+
+	#[test]
+	fn edge_block_is_scoped_to_403() {
+		for status in [400, 401, 429, 500, 502, 503] {
+			assert!(
+				!is_edge_block(status, WAF_CUSTOM_BLOCK_PAGE),
+				"expected {status} to stay an upstream failure"
+			);
+		}
+		assert!(!is_edge_block(200, WAF_CUSTOM_BLOCK_PAGE));
 	}
 
 	const CLOUDFLARE_CHALLENGE_PAGE: &[u8] = br#"<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title><meta http-equiv="refresh" content="360"></head><body><div class="main-wrapper" role="main"><noscript><span id="challenge-error-text">Enable JavaScript and cookies to continue</span></noscript></div><script nonce="UWPAt20YJwDjVxfZvpSJVX">(function(){window._cf_chl_opt = {cRay: 'a1fbdcf40dd6851a',cType: 'interactive',cZone: 'grindr.mobi'};var a = document.createElement('script');a.src = '/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=a1fbdcf40dd6851a';document.getElementsByTagName('head')[0].appendChild(a);}());</script></body></html>"#;
@@ -663,8 +819,12 @@ mod tests {
 	}
 
 	#[test]
-	fn raw_or_blocked_rejects_both_interstitials() {
-		for page in [CLOUDFLARE_BLOCK_PAGE, CLOUDFLARE_CHALLENGE_PAGE] {
+	fn raw_or_blocked_rejects_every_interstitial() {
+		for page in [
+			CLOUDFLARE_BLOCK_PAGE,
+			CLOUDFLARE_CHALLENGE_PAGE,
+			WAF_CUSTOM_BLOCK_PAGE,
+		] {
 			let err = raw_or_blocked(403, page.to_vec()).unwrap_err();
 			assert!(matches!(err, GrindrError::Blocked), "got {err:?}");
 		}

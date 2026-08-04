@@ -53,6 +53,8 @@ mod error;
 mod headers;
 mod rest;
 mod signing;
+#[cfg(test)]
+mod testserver;
 mod ws;
 
 pub use auth::{
@@ -67,8 +69,8 @@ pub use headers::{
 };
 pub use rest::RawResponse;
 pub use signing::{
-	DeviceSigningKey, MediaUploadResponse, UploadProfileImageResponse,
-	UploadedProfileImage,
+	requires_device_signature, DeviceSigningKey, MediaUploadResponse,
+	UploadProfileImageResponse, UploadedProfileImage,
 };
 pub use ws::{WsCommand, WsConnectionState, WsEvent};
 

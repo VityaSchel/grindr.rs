@@ -5,6 +5,8 @@
 //! server already receives. The key can be persisted with [`DeviceSigningKey`] so
 //! restarts reuse it instead of re-registering (matching the official app).
 
+use std::fmt;
+
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 use rand_core::{OsRng, RngCore};
@@ -131,11 +133,28 @@ pub(crate) struct UploadSignature {
 /// [`GrindrClient::signing_key_receiver`](crate::GrindrClient::signing_key_receiver).
 /// It is scoped to one account and device; the client discards it on
 /// [`logout`](crate::GrindrClient::logout) and
-/// [`rotate_device`](crate::GrindrClient::rotate_device).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// [`rotate_device`](crate::GrindrClient::rotate_device). Its [`fmt::Debug`]
+/// redacts the key.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DeviceSigningKey {
 	key: String,
 	user_id: String,
+}
+
+impl DeviceSigningKey {
+	/// Profile id this key was registered for.
+	pub fn user_id(&self) -> &str {
+		&self.user_id
+	}
+}
+
+impl fmt::Debug for DeviceSigningKey {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("DeviceSigningKey")
+			.field("key", &"<redacted>")
+			.field("user_id", &self.user_id)
+			.finish()
+	}
 }
 
 #[derive(Serialize)]
@@ -175,6 +194,20 @@ pub(crate) fn signing_reject(body: &[u8]) -> Option<SigningReject> {
 	} else {
 		Some(SigningReject::Fatal)
 	}
+}
+
+const SIGNED_UPLOAD_PATHS: [&str; 2] =
+	["/v5/media/upload", "/v6/chat/media/upload"];
+
+/// Whether an API path must be sent with
+/// [`request_signed_bytes`](crate::GrindrClient::request_signed_bytes) rather
+/// than [`request_authenticated_bytes`](crate::GrindrClient::request_authenticated_bytes).
+///
+/// The query string is ignored, so `/v5/media/upload?takenOnGrindr=true`
+/// answers the same as `/v5/media/upload`.
+pub fn requires_device_signature(path: &str) -> bool {
+	let path = path.split(['?', '#']).next().unwrap_or(path);
+	SIGNED_UPLOAD_PATHS.contains(&path)
 }
 
 /// Response from a signed profile-image upload (`POST /v5/media/upload`).
@@ -223,10 +256,32 @@ mod tests {
 	use super::*;
 
 	#[test]
+	fn signature_requirement_covers_upload_paths_with_any_query() {
+		assert!(requires_device_signature("/v5/media/upload"));
+		assert!(requires_device_signature(
+			"/v6/chat/media/upload?takenOnGrindr=true"
+		));
+
+		assert!(!requires_device_signature("/v3/me/profile"));
+		assert!(!requires_device_signature("/v5/media/uploads"));
+		assert!(!requires_device_signature("/v5/media/upload/extra"));
+	}
+
+	#[test]
 	fn key_id_is_sha256_of_public_key() {
 		let key = DeviceKey::generate("1".into());
 		let spki = URL_SAFE_NO_PAD.decode(key.public_key()).unwrap();
 		assert_eq!(key.key_id(), b64url(Sha256::digest(&spki)));
+	}
+
+	#[test]
+	fn debug_does_not_leak_the_private_key() {
+		let exported = DeviceKey::generate("42".to_owned()).export();
+		let rendered = format!("{exported:?}");
+
+		assert!(!rendered.contains(&exported.key), "got {rendered}");
+		assert!(rendered.contains("<redacted>"), "got {rendered}");
+		assert!(rendered.contains("42"), "got {rendered}");
 	}
 
 	#[test]

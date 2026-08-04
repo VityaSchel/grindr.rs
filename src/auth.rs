@@ -51,6 +51,36 @@ pub struct Session {
 	pub restriction: Option<Restriction>,
 }
 
+impl Session {
+	/// Builds a session from a stored long-lived `auth_token`, for resuming an
+	/// account without its short-lived `session_id`.
+	///
+	/// The session starts expired, so the first authenticated call refreshes it
+	/// and fills in `profile_id` and the rest. Pass the result to
+	/// [`GrindrClient::new`](crate::GrindrClient::new), then read the refreshed
+	/// session back from
+	/// [`session_receiver`](crate::GrindrClient::session_receiver).
+	///
+	/// Only for email accounts — third-party sessions must come from
+	/// [`google_sign_in`](crate::GrindrClient::google_sign_in), which supplies
+	/// the vendor-scoped id that their refresh endpoint requires.
+	pub fn from_auth_token(
+		email: impl Into<String>,
+		auth_token: impl Into<String>,
+	) -> Self {
+		Session {
+			email: email.into(),
+			expires_at: 0,
+			profile_id: String::new(),
+			session_id: String::new(),
+			auth_token: auth_token.into(),
+			kind: SessionKind::Email,
+			third_party_user_id: None,
+			restriction: None,
+		}
+	}
+}
+
 /// An account restriction carried in the session JWT.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -612,12 +642,26 @@ pub(crate) async fn authorization_header(
 		.read()
 		.await
 		.as_ref()
+		.filter(|s| !s.session_id.is_empty())
 		.map(|s| format!("Grindr3 {}", s.session_id))
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn from_auth_token_starts_expired_so_the_first_call_refreshes() {
+		let session = Session::from_auth_token("a@b.c", "long-lived");
+
+		assert_eq!(session.email, "a@b.c");
+		assert_eq!(session.auth_token, "long-lived");
+		assert_eq!(session.expires_at, 0);
+		assert!(session.session_id.is_empty());
+		assert!(session.profile_id.is_empty());
+		assert_eq!(session.kind, SessionKind::Email);
+		assert!(session.third_party_user_id.is_none());
+	}
 
 	// Header {"alg":"HS256","typ":"JWT"} . payload {"exp":9999999999} . sig
 	const JWT: &str =

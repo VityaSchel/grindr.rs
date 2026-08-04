@@ -23,7 +23,7 @@ This crate is a transport: it handles authentication, fingerprinting, connection
 
 ```toml
 [dependencies]
-grindr = "0.7"
+grindr = "0.9"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 serde_json = "1"
 ```
@@ -146,8 +146,11 @@ Only the initial request carries a `geohash`; automatic background refreshes nev
 | `request_authenticated_raw(method, path, body) -> Result<RawResponse>`                 | Authenticated JSON call returning the raw status + body          |
 | `request_authenticated_bytes(method, path, content_type, body) -> Result<RawResponse>` | Same, with a raw binary body                                     |
 | `request_signed_bytes(method, path, content_type, body) -> Result<RawResponse>`        | Same, plus device-key signing — for upload paths that require it |
+| `request_no_auth_raw(method, path, body) -> Result<RawResponse>`                       | Unauthenticated call on the same transport — sign-in, bootstrap, probes |
 
 `path` must start with `/`, otherwise you get `GrindrError::InvalidRequest`.
+
+`requires_device_signature(path)` tells you which paths need `request_signed_bytes` rather than `request_authenticated_bytes`.
 
 #### Media uploads
 
@@ -157,7 +160,7 @@ Signed uploads register an ephemeral P-256 device key on first use. Persist it t
 | --------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | `upload_profile_image(jpeg, thumb_coords, taken_on_grindr) -> Result<UploadProfileImageResponse>`         | Signed `POST /v5/media/upload`           |
 | `upload_chat_media(bytes, content_type, length, looping, taken_on_grindr) -> Result<MediaUploadResponse>` | Signed `POST /v6/chat/media/upload`      |
-| `restore_signing_key(key)`                                                                                | Restore a persisted `DeviceSigningKey`   |
+| `restore_signing_key(key) -> bool`                                                                        | Restore a persisted `DeviceSigningKey`; refused if it belongs to another account |
 | `signing_key_receiver() -> watch::Receiver<Option<DeviceSigningKey>>`                                     | Watch the signing key so you can save it |
 
 #### Realtime websocket
@@ -183,7 +186,7 @@ Everything under **Identity and session** and **Requests and errors** — except
 **Identity and session**
 
 - `DeviceInfo` — device identity, build with `DeviceInfo::generate()` or `DeviceInfo::default()`
-- `Session` — session token and other secrets. `Debug` redacts the credentials
+- `Session` — session token and other secrets. `Debug` redacts the credentials. `Session::from_auth_token(email, auth_token)` resumes an email account from a stored long-lived token
 - `SessionKind` — `Email` or `Google`
 - `LoginResult` — `{ profile_id, restriction }`, returned by the auth methods
 - `Restriction` — account restriction from the session JWT, the session is still valid: `AgeVerification { region, reason }` / `TimedBan(BanDetails)` / `TrustVendorRejected` / `Other(String)`
@@ -193,14 +196,14 @@ Everything under **Identity and session** and **Requests and errors** — except
 **Requests and errors**
 
 - `RawResponse` — `{ status: u16, body: Vec<u8> }`
-- `GrindrError` — the crate error type (`Http`, `Auth`, `Api`, `Unauthorized`, `Banned`, `RateLimited`, `Blocked`, `InvalidRequest`); `GrindrError::from_response(status, body)` maps a non-success `RawResponse` the same way the typed methods do
+- `GrindrError` — the crate error type (`Http`, `Auth`, `Api`, `Unauthorized`, `Banned`, `RateLimited`, `Blocked`, `InvalidRequest`, `SessionCleared`); `GrindrError::from_response(status, body)` maps a non-success `RawResponse` the same way the typed methods do
 - `BanInfo` — `{ kind, code, message, reason, sub_reason, automated }`
 - `BanKind` — `Profile` / `Device` / `Network` / `Underage`
 - `AuthEvent` — `LoggedOut` / `Banned(BanInfo)` / `RefreshFailed { message }` from background refreshes
 
 **Uploads**
 
-- `DeviceSigningKey` — persistable P-256 upload signing key, scoped to one account and device
+- `DeviceSigningKey` — persistable P-256 upload signing key, scoped to one account and device. `Debug` redacts the key
 - `UploadProfileImageResponse` — `{ hash, image_sizes }`
 - `UploadedProfileImage` — `{ media_hash, full_url, state, thumbnail, size }`
 - `MediaUploadResponse` — `{ media_id, url, media_hash }`
@@ -224,6 +227,7 @@ For building your own `wreq::Client` with an identical fingerprint:
 - `build_user_agent(device, tier) -> String` — `User-Agent` value
 - `build_device_info_header(device) -> String` — `L-Device-Info` value
 - `GrindrHeaders::build(device, ua, authorization, roles)` — full and correctly ordered headers list
+- `requires_device_signature(path) -> bool` — whether an upload path needs the device signature headers
 - `APP_VERSION` — the Grindr APK version this crate emulates
 
 ## Examples
@@ -244,7 +248,7 @@ The `fingerprint_check` example verifies JA3/JA4, the Akamai http/2 fingerprint 
 
 ## Minimum supported Rust version
 
-Rust **1.80**.
+Rust **1.88**.
 
 ## License
 

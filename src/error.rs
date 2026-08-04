@@ -45,15 +45,17 @@ pub enum GrindrError {
 	#[error("rate limited")]
 	RateLimited,
 
-	/// Cloudflare answered before the request reached Grindr, with either the
-	/// "Sorry, you have been blocked" page or a "Just a moment..." browser
-	/// challenge — usually because it didn't like the TLS/HTTP fingerprint.
+	/// An edge in front of Grindr answered instead of the API: a Cloudflare
+	/// block page, a "Just a moment..." browser challenge, a WAF custom
+	/// response, or an intercepting proxy — usually because Cloudflare didn't
+	/// like the TLS/HTTP fingerprint. Recognized by shape: a `403` whose body
+	/// isn't JSON, or a challenge marker on any non-success status.
 	///
 	/// Often transient: retrying the same request sometimes gets through, so
 	/// this is worth a backoff-and-retry rather than treating it as terminal.
 	/// If it persists, rotate the device identity with
 	/// [`rotate_device`](crate::GrindrClient::rotate_device).
-	#[error("blocked by Cloudflare")]
+	#[error("blocked before reaching the API")]
 	Blocked,
 
 	/// A request argument was malformed, e.g. a path that does not begin with

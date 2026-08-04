@@ -304,10 +304,11 @@ impl GrindrClient {
 	/// Restores a persisted [`DeviceSigningKey`] so uploads reuse it instead of
 	/// registering a fresh key.
 	///
-	/// Silently ignored if it can't decode; if it was saved for a different
-	/// account than the current session, it's replaced on the next upload.
-	pub async fn restore_signing_key(&self, key: DeviceSigningKey) {
-		self.inner.restore_signing_key(key).await;
+	/// Returns whether it was taken: a key that can't be decoded, or that was
+	/// saved for a different account than the current session, is refused.
+	#[must_use]
+	pub async fn restore_signing_key(&self, key: DeviceSigningKey) -> bool {
+		self.inner.restore_signing_key(&self.auth, key).await
 	}
 
 	/// Watches the websocket [`WsConnectionState`].
@@ -427,8 +428,9 @@ impl GrindrClient {
 	/// `/v3/me/profile`), otherwise you get [`GrindrError::InvalidRequest`]. The
 	/// session token is added for you, refreshing first if it's about to expire.
 	/// The body comes back as-is for you to deserialize, including non-success
-	/// statuses; map those with [`GrindrError::from_response`]. A Cloudflare
-	/// block page turns into [`GrindrError::Blocked`] instead.
+	/// statuses; map those with [`GrindrError::from_response`]. An edge
+	/// interstitial (a `403` that isn't JSON, or a Cloudflare challenge) turns
+	/// into [`GrindrError::Blocked`] instead.
 	///
 	/// This crate doesn't ship response types. See the API reference at
 	/// <https://opengrind.org/grindr-api/> and the dev tool at
@@ -449,6 +451,24 @@ impl GrindrClient {
 			.await
 	}
 
+	/// Makes an unauthenticated request and returns the raw status and body, for
+	/// the endpoints that take no session (sign-in, `/v3/bootstrap`, feature
+	/// probes).
+	///
+	/// Same transport and path rules as
+	/// [`request_authenticated_raw`](Self::request_authenticated_raw), without
+	/// the `Authorization` and `L-Grindr-Roles` headers.
+	pub async fn request_no_auth_raw(
+		&self,
+		method: Method,
+		path: &str,
+		body: Option<serde_json::Value>,
+	) -> Result<RawResponse, GrindrError> {
+		self.inner
+			.request_no_auth_raw(method, path, body.map(RequestBody::Json))
+			.await
+	}
+
 	/// Like [`request_authenticated_raw`](Self::request_authenticated_raw), but
 	/// sends a raw binary body with the given `Content-Type` instead of JSON —
 	/// for endpoints like `POST /v6/chat/media/upload` that take the file bytes
@@ -457,8 +477,8 @@ impl GrindrClient {
 	/// `body` accepts anything convertible to [`Bytes`]; a `Vec<u8>` converts
 	/// without copying. Non-success statuses come back as a normal
 	/// [`RawResponse`]; map them with [`GrindrError::from_response`] to get the
-	/// same errors the crate's typed methods return. A Cloudflare block page
-	/// turns into [`GrindrError::Blocked`].
+	/// same errors the crate's typed methods return. An edge interstitial turns
+	/// into [`GrindrError::Blocked`].
 	pub async fn request_authenticated_bytes(
 		&self,
 		method: Method,
@@ -612,6 +632,33 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn a_session_without_a_token_is_never_sent_as_an_empty_bearer() {
+		// Far-future expiry stands in for a refresh that already ran.
+		let mut session = Session::from_auth_token("a@b.c", "auth-tok");
+		session.expires_at = u64::MAX;
+		let client =
+			GrindrClient::new(DeviceInfo::generate(), Some(session)).unwrap();
+
+		let err = client
+			.request_authenticated_raw(Method::GET, "/v3/me/profile", None)
+			.await
+			.unwrap_err();
+		assert!(matches!(err, GrindrError::Auth(_)), "got {err:?}");
+	}
+
+	#[tokio::test]
+	async fn no_auth_requests_need_no_session_but_validate_the_path() {
+		let client = GrindrClient::new(DeviceInfo::generate(), None).unwrap();
+
+		let err = client
+			.request_no_auth_raw(Method::GET, "evil.com/x", None)
+			.await
+			.unwrap_err();
+		assert!(matches!(err, GrindrError::InvalidRequest(_)));
+		assert!(!client.ws_started.is_completed());
+	}
+
+	#[tokio::test]
 	async fn bytes_requests_require_a_session_and_validate_the_path() {
 		let client = GrindrClient::new(DeviceInfo::generate(), None).unwrap();
 
@@ -636,6 +683,135 @@ mod tests {
 			.await
 			.unwrap_err();
 		assert!(matches!(err, GrindrError::InvalidRequest(_)));
+	}
+
+	#[tokio::test]
+	async fn a_token_resumed_session_refreshes_before_its_first_request() {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		let client = GrindrClient::new(
+			device,
+			Some(Session::from_auth_token("a@b.c", "stored-tok")),
+		)
+		.unwrap();
+
+		let resp = client
+			.request_authenticated_raw(Method::GET, "/v3/bootstrap", None)
+			.await
+			.unwrap();
+		assert_eq!(resp.status, 200);
+
+		let requests = crate::testserver::requests_from(&device_id);
+		assert_eq!(
+			requests[0].path, "/v8/sessions",
+			"the refresh must precede the call it authorizes"
+		);
+		assert_eq!(requests[1].path, "/v3/bootstrap");
+
+		let refreshed = client.session_receiver().borrow().clone().unwrap();
+		assert_eq!(
+			refreshed.profile_id,
+			crate::testserver::REFRESHED_PROFILE_ID
+		);
+		let bearer = format!("Grindr3 {}", refreshed.session_id);
+		assert_eq!(requests[1].header("authorization"), Some(bearer.as_str()));
+	}
+
+	#[tokio::test]
+	async fn a_token_resumed_upload_binds_the_key_to_the_refreshed_profile_id()
+	{
+		use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+		use base64::Engine;
+		use p256::ecdsa::{signature::Verifier, DerSignature, VerifyingKey};
+		use spki::DecodePublicKey;
+
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		let client = GrindrClient::new(
+			device,
+			Some(Session::from_auth_token("a@b.c", "stored-tok")),
+		)
+		.unwrap();
+
+		client
+			.upload_profile_image(vec![0xFF, 0xD8], None, false)
+			.await
+			.unwrap();
+
+		let requests = crate::testserver::requests_from(&device_id);
+		let paths: Vec<&str> =
+			requests.iter().map(|r| r.path.as_str()).collect();
+		assert_eq!(
+			paths,
+			[
+				"/v8/sessions",
+				"/v1/verification/device-keys/challenge",
+				"/v1/verification/device-keys",
+				"/v5/media/upload?takenOnGrindr=false",
+			],
+			"the refresh must land before the key is generated"
+		);
+
+		assert_eq!(requests[2].method, "POST");
+		let registration: serde_json::Value =
+			serde_json::from_str(&requests[2].body).unwrap();
+		let public_key = registration["publicKey"].as_str().unwrap();
+		let key_id = registration["keyId"].as_str().unwrap();
+		let signature = registration["registrationSignature"].as_str().unwrap();
+
+		let verifying = VerifyingKey::from(
+			p256::PublicKey::from_public_key_der(
+				&URL_SAFE_NO_PAD.decode(public_key).unwrap(),
+			)
+			.unwrap(),
+		);
+		let der = URL_SAFE_NO_PAD.decode(signature).unwrap();
+		let signature = DerSignature::try_from(der.as_slice()).unwrap();
+		let signed_for = |user_id: &str| {
+			format!(
+				"{user_id}|{key_id}|{public_key}|{device_id}|{}",
+				crate::testserver::CHALLENGE
+			)
+		};
+
+		assert!(
+			verifying
+				.verify(
+					signed_for(crate::testserver::REFRESHED_PROFILE_ID)
+						.as_bytes(),
+					&signature
+				)
+				.is_ok(),
+			"the key must bind to the refreshed profile id"
+		);
+		assert!(
+			verifying
+				.verify(signed_for("").as_bytes(), &signature)
+				.is_err(),
+			"the key must not bind to the blank pre-refresh profile id"
+		);
+	}
+
+	#[tokio::test]
+	async fn no_auth_requests_carry_no_credentials_even_with_a_session() {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		let client = GrindrClient::new(device, Some(fake_session())).unwrap();
+
+		let resp = client
+			.request_no_auth_raw(Method::GET, "/v3/bootstrap", None)
+			.await
+			.unwrap();
+		assert_eq!(resp.status, 200);
+		assert_eq!(resp.body, br#"{"ok":true}"#);
+
+		let requests = crate::testserver::requests_from(&device_id);
+		let bootstrap = &requests[0];
+		assert_eq!(bootstrap.method, "GET");
+		assert_eq!(bootstrap.path, "/v3/bootstrap");
+		assert_eq!(bootstrap.header("authorization"), None);
+		assert_eq!(bootstrap.header("l-grindr-roles"), None);
+		assert!(bootstrap.header("l-device-info").is_some());
 	}
 
 	#[tokio::test]

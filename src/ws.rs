@@ -17,6 +17,11 @@ const WS_URL: &str = "wss://grindr.mobi/v1/ws";
 
 const WS_BROADCAST_CAPACITY: usize = 256;
 
+const WS_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+
+/// The app's okhttp websocket client sets `pingInterval(10, SECONDS)`.
+const WS_PING_INTERVAL: Duration = Duration::from_secs(10);
+
 /// A command to send over the websocket.
 ///
 /// The client adds the session token; you set `type`, `ref_id`, and `payload`.
@@ -155,7 +160,11 @@ async fn connect_and_run(
 		Some("[FREE]"),
 	)?;
 
-	let mut builder = fp.ws_http.websocket(WS_URL);
+	let mut builder = fp
+		.ws_http
+		.websocket(WS_URL)
+		.max_message_size(WS_MAX_MESSAGE_BYTES)
+		.max_frame_size(WS_MAX_MESSAGE_BYTES);
 	for (name, value) in &headers.items {
 		builder = builder.header(name.clone(), value.clone());
 	}
@@ -195,8 +204,19 @@ async fn run_message_loop(
 		return Ok(());
 	}
 
+	let mut ping = tokio::time::interval_at(
+		tokio::time::Instant::now() + WS_PING_INTERVAL,
+		WS_PING_INTERVAL,
+	);
+	ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
 	loop {
 		tokio::select! {
+			_ = ping.tick() => {
+				ws.send(Message::Ping(Default::default()))
+					.await
+					.map_err(|e| GrindrError::Http(e.to_string()))?;
+			}
 			changed = session_rx.changed() => {
 				let logged_out = changed.is_err() || session_rx.borrow_and_update().is_none();
 				if logged_out {

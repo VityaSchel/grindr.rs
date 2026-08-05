@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use serde::{de::DeserializeOwned, Serialize};
@@ -9,8 +9,9 @@ use wreq::header::HeaderMap;
 use wreq::{Client, Method, RequestBuilder};
 
 use crate::auth::AuthState;
+use crate::client::{CALL_TIMEOUT, UPLOAD_TIMEOUT};
 use crate::device::DeviceInfo;
-use crate::error::{BanInfo, BanKind, GrindrError};
+use crate::error::{BanInfo, BanKind, BlockKind, GrindrError};
 use crate::headers::GrindrHeaders;
 use crate::signing::{
 	signing_reject, DeviceKey, DeviceSigningKey, SigningReject,
@@ -164,6 +165,13 @@ impl InnerClient {
 		}
 	}
 
+	fn call_timeout(body: Option<&RequestBody>) -> Duration {
+		match body {
+			Some(RequestBody::Raw { .. }) => UPLOAD_TIMEOUT,
+			_ => CALL_TIMEOUT,
+		}
+	}
+
 	pub async fn request_no_auth<TReq, TResp>(
 		&self,
 		method: Method,
@@ -183,6 +191,7 @@ impl InnerClient {
 			fp.http.request(method, format!("{}{path}", base_url())),
 			&headers.items,
 		);
+		req = req.timeout(CALL_TIMEOUT);
 		if let Some(b) = body {
 			req = req.json(b);
 		}
@@ -213,7 +222,8 @@ impl InnerClient {
 			Self::apply_headers(
 				fp.http.request(method, format!("{}{path}", base_url())),
 				&headers.items,
-			),
+			)
+			.timeout(Self::call_timeout(body.as_ref())),
 			body.as_ref(),
 		);
 
@@ -260,7 +270,8 @@ impl InnerClient {
 						format!("{}{path}", base_url()),
 					),
 					&headers.items,
-				),
+				)
+				.timeout(Self::call_timeout(body.as_ref())),
 				body.as_ref(),
 			);
 
@@ -424,6 +435,7 @@ impl InnerClient {
 					.request(method.clone(), format!("{}{path}", base_url())),
 				&headers.items,
 			)
+			.timeout(UPLOAD_TIMEOUT)
 			.header("x-key-id", &signature.key_id)
 			.header("x-sig", &signature.signature)
 			.header("x-timestamp", signature.timestamp.to_string())
@@ -498,23 +510,40 @@ pub(crate) fn is_cloudflare_challenge(status: u16, body: &[u8]) -> bool {
 		|| text.contains("/cdn-cgi/challenge-platform/")
 }
 
-pub(crate) fn is_edge_interstitial(status: u16, body: &[u8]) -> bool {
-	is_edge_block(status, body) || is_cloudflare_challenge(status, body)
+fn is_cloudflare_block_page(body: &[u8]) -> bool {
+	let text = String::from_utf8_lossy(body);
+	text.contains("Attention Required! | Cloudflare")
+		|| text.contains("Sorry, you have been blocked")
+		|| text.contains("/cdn-cgi/")
+}
+
+pub(crate) fn block_kind(status: u16, body: &[u8]) -> Option<BlockKind> {
+	if is_cloudflare_challenge(status, body) {
+		return Some(BlockKind::Cloudflare);
+	}
+	if !is_edge_block(status, body) {
+		return None;
+	}
+	Some(if is_cloudflare_block_page(body) {
+		BlockKind::Cloudflare
+	} else {
+		BlockKind::Edge
+	})
 }
 
 fn raw_or_blocked(
 	status: u16,
 	body: Vec<u8>,
 ) -> Result<RawResponse, GrindrError> {
-	if is_edge_interstitial(status, &body) {
-		return Err(GrindrError::Blocked);
+	if let Some(kind) = block_kind(status, &body) {
+		return Err(GrindrError::Blocked(kind));
 	}
 	Ok(RawResponse { status, body })
 }
 
 pub(crate) fn parse_api_error(bytes: &[u8], http_status: u16) -> GrindrError {
-	if is_edge_interstitial(http_status, bytes) {
-		return GrindrError::Blocked;
+	if let Some(kind) = block_kind(http_status, bytes) {
+		return GrindrError::Blocked(kind);
 	}
 
 	let (code, message) = extract_api_error(bytes, http_status);
@@ -634,6 +663,20 @@ mod tests {
 	}
 
 	#[test]
+	fn only_byte_bodies_get_the_upload_timeout() {
+		let raw = RequestBody::Raw {
+			content_type: "image/jpeg".to_owned(),
+			bytes: Bytes::from_static(b"jpeg"),
+		};
+		let json = RequestBody::Json(serde_json::json!({}));
+
+		assert_eq!(InnerClient::call_timeout(Some(&raw)), UPLOAD_TIMEOUT);
+		assert_eq!(InnerClient::call_timeout(Some(&json)), CALL_TIMEOUT);
+		assert_eq!(InnerClient::call_timeout(None), CALL_TIMEOUT);
+		assert!(UPLOAD_TIMEOUT > CALL_TIMEOUT);
+	}
+
+	#[test]
 	fn accepts_absolute_paths() {
 		assert!(validate_path("/v3/me/profile").is_ok());
 		assert!(validate_path("/").is_ok());
@@ -707,7 +750,10 @@ mod tests {
 	#[test]
 	fn from_response_maps_cloudflare_block_to_blocked() {
 		let err = GrindrError::from_response(403, CLOUDFLARE_BLOCK_PAGE);
-		assert!(matches!(err, GrindrError::Blocked), "got {err:?}");
+		assert!(
+			matches!(err, GrindrError::Blocked(BlockKind::Cloudflare)),
+			"got {err:?}"
+		);
 	}
 
 	/// A WAF custom response: a block that carries none of the markers the
@@ -727,8 +773,30 @@ mod tests {
 			assert!(is_edge_block(403, page), "expected a block for {page:?}");
 			assert!(matches!(
 				GrindrError::from_response(403, page),
-				GrindrError::Blocked
+				GrindrError::Blocked(_)
 			));
+		}
+	}
+
+	#[test]
+	fn only_cloudflare_pages_are_attributed_to_cloudflare() {
+		for page in [CLOUDFLARE_BLOCK_PAGE, CLOUDFLARE_CHALLENGE_PAGE] {
+			assert_eq!(block_kind(403, page), Some(BlockKind::Cloudflare));
+		}
+		for page in [WAF_CUSTOM_BLOCK_PAGE, &b"Forbidden"[..]] {
+			assert_eq!(block_kind(403, page), Some(BlockKind::Edge));
+		}
+		assert_eq!(block_kind(403, br#"{"code":28}"#), None);
+	}
+
+	#[test]
+	fn a_challenge_is_cloudflare_on_non_403_statuses() {
+		for status in [429, 503] {
+			assert_eq!(
+				block_kind(status, CLOUDFLARE_CHALLENGE_PAGE),
+				Some(BlockKind::Cloudflare),
+			);
+			assert_eq!(block_kind(status, WAF_CUSTOM_BLOCK_PAGE), None);
 		}
 	}
 
@@ -760,7 +828,10 @@ mod tests {
 	#[test]
 	fn from_response_maps_cloudflare_challenge_to_blocked() {
 		let err = GrindrError::from_response(403, CLOUDFLARE_CHALLENGE_PAGE);
-		assert!(matches!(err, GrindrError::Blocked), "got {err:?}");
+		assert!(
+			matches!(err, GrindrError::Blocked(BlockKind::Cloudflare)),
+			"got {err:?}"
+		);
 	}
 
 	#[test]
@@ -772,7 +843,7 @@ mod tests {
 			);
 			assert!(matches!(
 				GrindrError::from_response(status, CLOUDFLARE_CHALLENGE_PAGE),
-				GrindrError::Blocked
+				GrindrError::Blocked(BlockKind::Cloudflare)
 			));
 		}
 	}
@@ -826,7 +897,7 @@ mod tests {
 			WAF_CUSTOM_BLOCK_PAGE,
 		] {
 			let err = raw_or_blocked(403, page.to_vec()).unwrap_err();
-			assert!(matches!(err, GrindrError::Blocked), "got {err:?}");
+			assert!(matches!(err, GrindrError::Blocked(_)), "got {err:?}");
 		}
 		let ok = raw_or_blocked(403, b"{\"code\":4}".to_vec()).unwrap();
 		assert_eq!(ok.status, 403);

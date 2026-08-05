@@ -116,8 +116,10 @@ pub fn probe_emulation() -> EmulationProvider {
 }
 
 /// okhttp's defaults
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(35);
+pub(crate) const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Shared `wreq` setup: the emulation profile plus gzip-only encoding.
 fn grindr_client_builder() -> wreq::ClientBuilder {
@@ -536,6 +538,23 @@ impl GrindrClient {
 		}
 		let resp = self
 			.request_signed_bytes(Method::POST, &path, "image/jpeg", jpeg)
+			.await?;
+		parse_json(resp)
+	}
+
+	/// Uploads chat media via unsigned `POST /v5/chat/media/upload`.
+	pub async fn upload_chat_media_unsigned(
+		&self,
+		bytes: impl Into<Bytes>,
+		content_type: &str,
+	) -> Result<MediaUploadResponse, GrindrError> {
+		let resp = self
+			.request_authenticated_bytes(
+				Method::POST,
+				"/v5/chat/media/upload?takenOnGrindr=false",
+				content_type,
+				bytes,
+			)
 			.await?;
 		parse_json(resp)
 	}

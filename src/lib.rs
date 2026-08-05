@@ -63,7 +63,7 @@ pub use auth::{
 };
 pub use client::{probe_emulation, GrindrClient};
 pub use device::DeviceInfo;
-pub use error::{BanInfo, BanKind, GrindrError};
+pub use error::{BanInfo, BanKind, BlockKind, GrindrError};
 pub use headers::{
 	build_device_info_header, build_user_agent, GrindrHeaders, APP_VERSION,
 };

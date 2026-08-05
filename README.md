@@ -160,6 +160,7 @@ Signed uploads register an ephemeral P-256 device key on first use. Persist it t
 | --------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | `upload_profile_image(jpeg, thumb_coords, taken_on_grindr) -> Result<UploadProfileImageResponse>`         | Signed `POST /v5/media/upload`           |
 | `upload_chat_media(bytes, content_type, length, looping, taken_on_grindr) -> Result<MediaUploadResponse>` | Signed `POST /v6/chat/media/upload`      |
+| `upload_chat_media_unsigned(bytes, content_type) -> Result<MediaUploadResponse>`                          | Unsigned `POST /v5/chat/media/upload`, for media the user did not capture in the app |
 | `restore_signing_key(key) -> bool`                                                                        | Restore a persisted `DeviceSigningKey`; refused if it belongs to another account |
 | `signing_key_receiver() -> watch::Receiver<Option<DeviceSigningKey>>`                                     | Watch the signing key so you can save it |
 
@@ -196,7 +197,8 @@ Everything under **Identity and session** and **Requests and errors** — except
 **Requests and errors**
 
 - `RawResponse` — `{ status: u16, body: Vec<u8> }`
-- `GrindrError` — the crate error type (`Http`, `Auth`, `Api`, `Unauthorized`, `Banned`, `RateLimited`, `Blocked`, `InvalidRequest`, `SessionCleared`); `GrindrError::from_response(status, body)` maps a non-success `RawResponse` the same way the typed methods do
+- `GrindrError` — the crate error type (`Http`, `Auth`, `Api`, `Unauthorized`, `Banned`, `RateLimited`, `Blocked(BlockKind)`, `InvalidRequest`, `SessionCleared`); `GrindrError::from_response(status, body)` maps a non-success `RawResponse` the same way the typed methods do
+- `BlockKind` — `Cloudflare` for Cloudflare block page or "Just a moment..." challenge, `Edge` for anything else
 - `BanInfo` — `{ kind, code, message, reason, sub_reason, automated }`
 - `BanKind` — `Profile` / `Device` / `Network` / `Underage`
 - `AuthEvent` — `LoggedOut` / `Banned(BanInfo)` / `RefreshFailed { message }` from background refreshes

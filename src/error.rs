@@ -1,4 +1,24 @@
+use std::fmt;
+
 use thiserror::Error;
+
+/// Who answered instead of the API, for a [`GrindrError::Blocked`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockKind {
+	/// A Cloudflare block page or "Just a moment..." browser challenge.
+	Cloudflare,
+	/// An interstitial block.
+	Edge,
+}
+
+impl fmt::Display for BlockKind {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			BlockKind::Cloudflare => write!(f, "Cloudflare"),
+			BlockKind::Edge => write!(f, "network edge"),
+		}
+	}
+}
 
 /// Errors returned by this crate.
 ///
@@ -55,8 +75,8 @@ pub enum GrindrError {
 	/// this is worth a backoff-and-retry rather than treating it as terminal.
 	/// If it persists, rotate the device identity with
 	/// [`rotate_device`](crate::GrindrClient::rotate_device).
-	#[error("blocked before reaching the API")]
-	Blocked,
+	#[error("blocked before reaching the API ({0})")]
+	Blocked(BlockKind),
 
 	/// A request argument was malformed, e.g. a path that does not begin with
 	/// `/` and could therefore repoint the request to a different host.

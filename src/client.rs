@@ -737,6 +737,41 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn an_unsigned_chat_upload_registers_no_key_and_signs_nothing() {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		let client = GrindrClient::new(
+			device,
+			Some(Session::from_auth_token("a@b.c", "stored-tok")),
+		)
+		.unwrap();
+
+		let uploaded = client
+			.upload_chat_media_unsigned(vec![0xFF, 0xD8], "image/jpeg")
+			.await
+			.unwrap();
+
+		assert_eq!(uploaded.media_id, 7);
+		assert_eq!(uploaded.url, "https://cdn/x.jpg");
+		assert_eq!(uploaded.media_hash, "h");
+
+		let requests = crate::testserver::requests_from(&device_id);
+		let paths: Vec<&str> =
+			requests.iter().map(|r| r.path.as_str()).collect();
+		assert_eq!(
+			paths,
+			["/v8/sessions", "/v5/chat/media/upload?takenOnGrindr=false"],
+			"the unsigned path must not touch the device-key endpoints"
+		);
+
+		let upload = requests.last().unwrap();
+		assert_eq!(upload.method, "POST");
+		assert_eq!(upload.header("content-type"), Some("image/jpeg"));
+		assert_eq!(upload.header("x-key-id"), None);
+		assert_eq!(upload.header("x-sig"), None);
+	}
+
+	#[tokio::test]
 	async fn a_token_resumed_upload_binds_the_key_to_the_refreshed_profile_id()
 	{
 		use base64::engine::general_purpose::URL_SAFE_NO_PAD;

@@ -138,6 +138,11 @@ fn respond(path: &str) -> (&'static str, String) {
 			"200 OK",
 			r#"{"hash":"media-hash","imageSizes":[]}"#.to_owned(),
 		),
+		"/v5/chat/media/upload" => (
+			"200 OK",
+			r#"{"mediaId":7,"url":"https://cdn/x.jpg","mediaHash":"h"}"#
+				.to_owned(),
+		),
 		"/v3/bootstrap" => ("200 OK", r#"{"ok":true}"#.to_owned()),
 		_ => (
 			"404 Not Found",

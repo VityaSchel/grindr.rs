@@ -8,11 +8,11 @@ use crate::error::GrindrError;
 /// Changing it is a breaking change (it can change how requests behave), so it
 /// bumps the crate's breaking version too. The `+<apk>` suffix on the package
 /// version mirrors this string but means nothing to Cargo on its own.
-pub const APP_VERSION: &str = "26.12.0.169415";
-pub(crate) const BUILD_NUMBER: &str = "169415";
+pub const APP_VERSION: &str = "26.13.0.170510";
+pub(crate) const BUILD_NUMBER: &str = "170510";
 
 /// Builds the `User-Agent` the app sends, e.g.
-/// `grindr3/26.12.0.169415;169415;Free;Android 14;Pixel 8;Google`.
+/// `grindr3/26.13.0.170510;170510;Free;Android 14;Pixel 8;Google`.
 ///
 /// `subscription_tier` is usually `"Free"`.
 pub fn build_user_agent(

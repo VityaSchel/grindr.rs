@@ -23,7 +23,7 @@ This crate is a transport: it handles authentication, fingerprinting, connection
 
 ```toml
 [dependencies]
-grindr = "0.9"
+grindr = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 serde_json = "1"
 ```
@@ -196,6 +196,8 @@ Everything under **Identity and session** and **Requests and errors** — except
 
 **Requests and errors**
 
+Every request carries its own timeout — 35 s, matching the app's okhttp `callTimeout`, and 120 s when the body is bytes, so an upload is not cut off by what is meant to be a timeout. There is no need to wrap calls in one of your own.
+
 - `RawResponse` — `{ status: u16, body: Vec<u8> }`
 - `GrindrError` — the crate error type (`Http`, `Auth`, `Api`, `Unauthorized`, `Banned`, `RateLimited`, `Blocked(BlockKind)`, `InvalidRequest`, `SessionCleared`); `GrindrError::from_response(status, body)` maps a non-success `RawResponse` the same way the typed methods do
 - `BlockKind` — `Cloudflare` for Cloudflare block page or "Just a moment..." challenge, `Edge` for anything else
@@ -215,6 +217,8 @@ Everything under **Identity and session** and **Requests and errors** — except
 - `WsCommand` — websocket command `{ type, ref_id, payload }`
 - `WsEvent` — websocket event `{ event_type, payload }`
 - `WsConnectionState` — `Connected` / `Disconnected`
+
+The socket pings every 10 s like the app does, and refuses inbound frames and messages over 1 MiB.
 
 **Re-exports**
 

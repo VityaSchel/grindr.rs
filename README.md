@@ -141,11 +141,11 @@ Only the initial request carries a `geohash`; automatic background refreshes nev
 
 #### Requests
 
-| Method                                                                                 | Description                                                      |
-| -------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `request_authenticated_raw(method, path, body) -> Result<RawResponse>`                 | Authenticated JSON call returning the raw status + body          |
-| `request_authenticated_bytes(method, path, content_type, body) -> Result<RawResponse>` | Same, with a raw binary body                                     |
-| `request_signed_bytes(method, path, content_type, body) -> Result<RawResponse>`        | Same, plus device-key signing — for upload paths that require it |
+| Method                                                                                 | Description                                                             |
+| -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `request_authenticated_raw(method, path, body) -> Result<RawResponse>`                 | Authenticated JSON call returning the raw status + body                 |
+| `request_authenticated_bytes(method, path, content_type, body) -> Result<RawResponse>` | Same, with a raw binary body                                            |
+| `request_signed_bytes(method, path, content_type, body) -> Result<RawResponse>`        | Same, plus device-key signing — for upload paths that require it        |
 | `request_no_auth_raw(method, path, body) -> Result<RawResponse>`                       | Unauthenticated call on the same transport — sign-in, bootstrap, probes |
 
 `path` must start with `/`, otherwise you get `GrindrError::InvalidRequest`.
@@ -156,13 +156,13 @@ Only the initial request carries a `geohash`; automatic background refreshes nev
 
 Signed uploads register an ephemeral P-256 device key on first use. Persist it to avoid re-registering.
 
-| Method                                                                                                    | Description                              |
-| --------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| `upload_profile_image(jpeg, thumb_coords, taken_on_grindr) -> Result<UploadProfileImageResponse>`         | Signed `POST /v5/media/upload`           |
-| `upload_chat_media(bytes, content_type, length, looping, taken_on_grindr) -> Result<MediaUploadResponse>` | Signed `POST /v6/chat/media/upload`      |
+| Method                                                                                                    | Description                                                                          |
+| --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `upload_profile_image(jpeg, thumb_coords, taken_on_grindr) -> Result<UploadProfileImageResponse>`         | Signed `POST /v5/media/upload`                                                       |
+| `upload_chat_media(bytes, content_type, length, looping, taken_on_grindr) -> Result<MediaUploadResponse>` | Signed `POST /v6/chat/media/upload`                                                  |
 | `upload_chat_media_unsigned(bytes, content_type) -> Result<MediaUploadResponse>`                          | Unsigned `POST /v5/chat/media/upload`, for media the user did not capture in the app |
-| `restore_signing_key(key) -> bool`                                                                        | Restore a persisted `DeviceSigningKey`; refused if it belongs to another account |
-| `signing_key_receiver() -> watch::Receiver<Option<DeviceSigningKey>>`                                     | Watch the signing key so you can save it |
+| `restore_signing_key(key) -> bool`                                                                        | Restore a persisted `DeviceSigningKey`; refused if it belongs to another account     |
+| `signing_key_receiver() -> watch::Receiver<Option<DeviceSigningKey>>`                                     | Watch the signing key so you can save it                                             |
 
 #### Realtime websocket
 

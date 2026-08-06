@@ -1,15 +1,9 @@
 {
 	"editor.tabCompletion": "on",
 	"editor.formatOnSave": true,
-	"[json]": {
-		"editor.defaultFormatter": "vscode.json-language-features"
-	},
-	"[jsonc]": {
-		"editor.defaultFormatter": "vscode.json-language-features"
-	},
-	"[rust]": {
-		"editor.defaultFormatter": "rust-lang.rust-analyzer"
-	},
+	"[json]": { "editor.defaultFormatter": "vscode.json-language-features" },
+	"[jsonc]": { "editor.defaultFormatter": "vscode.json-language-features" },
+	"[rust]": { "editor.defaultFormatter": "rust-lang.rust-analyzer" },
 	"editor.indentSize": "tabSize",
 	"editor.detectIndentation": false,
 	"editor.insertSpaces": false,

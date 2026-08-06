@@ -1,16 +1,11 @@
+extends:
+  - node_modules/@opengrind/config/lefthook.yml
+
 pre-commit:
-  parallel: true
   commands:
-    fmt:
-      glob: "*.rs"
-      run: rustfmt --config skip_children=true {staged_files}
-      stage_fixed: true
     clippy:
       glob: "*.rs"
-      run: cargo clippy --all-targets -- -D warnings
-    test:
+      run: cargo clippy --all-targets
+    rust-test:
       glob: "*.rs"
       run: cargo test --quiet
-    shellcheck:
-      glob: "*.sh"
-      run: shellcheck {staged_files}

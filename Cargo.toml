@@ -13,7 +13,15 @@ readme = "README.md"
 license = "MIT"
 keywords = ["grindr", "api", "client"]
 categories = ["api-bindings"]
-exclude = [".gitignore", ".vscode"]
+exclude = [
+	".gitignore",
+	".vscode",
+	".editorconfig",
+	"bunfig.toml",
+	"bun.lock*",
+	"package.json",
+	"node_modules",
+]
 
 [dependencies]
 wreq = { version = "5.3", features = ["gzip", "json", "websocket"] }

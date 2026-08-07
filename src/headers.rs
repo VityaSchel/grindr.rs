@@ -11,6 +11,8 @@ use crate::error::GrindrError;
 pub const APP_VERSION: &str = "26.13.0.170510";
 pub(crate) const BUILD_NUMBER: &str = "170510";
 
+const MEDIA_ACCEPT: &str = "image/webp,image/*;q=0.8";
+
 /// Builds the `User-Agent` the app sends, e.g.
 /// `grindr3/26.13.0.170510;170510;Free;Android 14;Pixel 8;Google`.
 ///
@@ -109,6 +111,38 @@ impl GrindrHeaders {
 			HeaderName::from_static("accept-encoding"),
 			HeaderValue::from_static("gzip"),
 		));
+
+		Ok(Self { items })
+	}
+
+	/// Build the header set for a CDN media fetch: an image `Accept` and the
+	/// same `User-Agent` the API sends. A ranged request drops `Accept-Encoding`.
+	///
+	/// References <https://opengrind.org/grindr-api/media#cdn-request-headers>
+	pub fn build_media(
+		user_agent: &str,
+		range: Option<&str>,
+	) -> Result<Self, GrindrError> {
+		let mut items: Vec<(HeaderName, HeaderValue)> = Vec::with_capacity(3);
+
+		items.push((
+			HeaderName::from_static("accept"),
+			HeaderValue::from_static(MEDIA_ACCEPT),
+		));
+		items.push((
+			HeaderName::from_static("user-agent"),
+			HeaderValue::from_str(user_agent).map_err(invalid_header)?,
+		));
+		match range {
+			Some(range) => items.push((
+				HeaderName::from_static("range"),
+				HeaderValue::from_str(range).map_err(invalid_header)?,
+			)),
+			None => items.push((
+				HeaderName::from_static("accept-encoding"),
+				HeaderValue::from_static("gzip"),
+			)),
+		}
 
 		Ok(Self { items })
 	}

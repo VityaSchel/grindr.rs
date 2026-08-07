@@ -3,7 +3,7 @@ name = "grindr"
 # `<lib version>+<emulated Grindr app/API version>`. The build-metadata segment
 # after `+` is informational (ignored by Cargo's version resolution) and is kept
 # in lockstep with `APP_VERSION` in `src/headers.rs`.
-version = "0.10.0+26.13.0.170510"
+version = "0.11.0+26.13.0.170510"
 edition = "2021"
 rust-version = "1.88"
 description = "Unofficial async Rust client for the Grindr API"

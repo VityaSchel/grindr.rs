@@ -12,6 +12,7 @@ use crate::auth::{AuthEvent, AuthState, LoginResult, Session};
 use crate::device::DeviceInfo;
 use crate::error::GrindrError;
 use crate::headers::build_user_agent;
+use crate::media::{MediaRequest, MediaResponse};
 use crate::rest::{Fingerprint, InnerClient, RawResponse, RequestBody};
 use crate::signing::{
 	DeviceSigningKey, MediaUploadResponse, UploadProfileImageResponse,
@@ -580,6 +581,20 @@ impl GrindrClient {
 			.request_signed_bytes(Method::POST, &path, content_type, bytes)
 			.await?;
 		parse_json(resp)
+	}
+
+	/// Fetches a CDN file on the transport the API uses, with the headers the
+	/// app's image loader sends.
+	///
+	/// Only `https` on `cdns.grindr.com` or `*.cloudfront.net` is accepted,
+	/// redirects included; anything else is [`GrindrError::InvalidRequest`]
+	/// before a socket is opened. A non-success status comes back as an
+	/// ordinary [`MediaResponse`].
+	pub async fn fetch_media(
+		&self,
+		request: MediaRequest<'_>,
+	) -> Result<MediaResponse, GrindrError> {
+		self.inner.fetch_media(request).await
 	}
 
 	/// Replaces the device identity and the underlying HTTP/TLS transport while

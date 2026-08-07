@@ -152,6 +152,14 @@ Only the initial request carries a `geohash`; automatic background refreshes nev
 
 `requires_device_signature(path)` tells you which paths need `request_signed_bytes` rather than `request_authenticated_bytes`.
 
+#### Media downloads
+
+| Method                                               | Description                                                                |
+| ---------------------------------------------------- | -------------------------------------------------------------------------- |
+| `fetch_media(MediaRequest) -> Result<MediaResponse>` | GET a CDN file on the transport the API uses, with the app's image headers |
+
+Only `https` on `cdns.grindr.com` or `*.cloudfront.net` is accepted, redirects included; anything else is `GrindrError::InvalidRequest` before a socket is opened. Non-success status returns as `MediaResponse`.
+
 #### Media uploads
 
 Signed uploads register an ephemeral P-256 device key on first use. Persist it to avoid re-registering.
@@ -212,6 +220,11 @@ Every request carries its own timeout — 35 s, matching the app's okhttp `callT
 - `UploadedProfileImage` — `{ media_hash, full_url, state, thumbnail, size }`
 - `MediaUploadResponse` — `{ media_id, url, media_hash }`
 
+**Downloads**
+
+- `MediaRequest` — `{ url, range, max_bytes }` for `fetch_media`
+- `MediaResponse` — `{ status, content_type, content_range, accept_ranges, body }`. Size the body using `body.len()`; `Content-Length` is the compressed size and is dropped when decoding
+
 **Websocket**
 
 - `WsCommand` — websocket command `{ type, ref_id, payload }`
@@ -233,6 +246,7 @@ For building your own `wreq::Client` with an identical fingerprint:
 - `build_user_agent(device, tier) -> String` — `User-Agent` value
 - `build_device_info_header(device) -> String` — `L-Device-Info` value
 - `GrindrHeaders::build(device, ua, authorization, roles)` — full and correctly ordered headers list
+- `GrindrHeaders::build_media(ua, range)` — the CDN header list `fetch_media` sends
 - `requires_device_signature(path) -> bool` — whether an upload path needs the device signature headers
 - `APP_VERSION` — the Grindr APK version this crate emulates
 

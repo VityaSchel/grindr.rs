@@ -38,6 +38,17 @@ fn recordings() -> &'static Mutex<Vec<Recorded>> {
 	RECORDINGS.get_or_init(Mutex::default)
 }
 
+/// Requests to one exact path, for callers with no `l-device-info` to filter on.
+pub(crate) fn requests_to(path: &str) -> Vec<Recorded> {
+	recordings()
+		.lock()
+		.unwrap()
+		.iter()
+		.filter(|r| r.path == path)
+		.cloned()
+		.collect()
+}
+
 /// Requests made by one device, in the order the server saw them.
 pub(crate) fn requests_from(device_id: &str) -> Vec<Recorded> {
 	recordings()
@@ -105,7 +116,18 @@ fn serve(mut stream: TcpStream) {
 		return;
 	}
 
-	let (status, payload) = respond(&path);
+	let reply = match path.strip_prefix(MEDIA_PREFIX) {
+		Some(rest) => media_reply(rest, &headers),
+		None => {
+			let (status, payload) = respond(&path);
+			Reply {
+				status,
+				content_type: "application/json",
+				extra: Vec::new(),
+				body: payload.into_bytes(),
+			}
+		}
+	};
 	recordings().lock().unwrap().push(Recorded {
 		method,
 		path,
@@ -113,13 +135,78 @@ fn serve(mut stream: TcpStream) {
 		body: String::from_utf8_lossy(&body).into_owned(),
 	});
 
-	let _ = write!(
-		stream,
-		"HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
-		 content-length: {}\r\nconnection: close\r\n\r\n{payload}",
-		payload.len()
+	let mut head = format!(
+		"HTTP/1.1 {}\r\ncontent-type: {}\r\ncontent-length: {}\r\n\
+		 connection: close\r\n",
+		reply.status,
+		reply.content_type,
+		reply.body.len()
 	);
+	for (name, value) in &reply.extra {
+		head.push_str(&format!("{name}: {value}\r\n"));
+	}
+	head.push_str("\r\n");
+	let _ = stream.write_all(head.as_bytes());
+	let _ = stream.write_all(&reply.body);
 	let _ = stream.flush();
+}
+
+struct Reply {
+	status: &'static str,
+	content_type: &'static str,
+	extra: Vec<(&'static str, String)>,
+	body: Vec<u8>,
+}
+
+/// `/media/<len>` serves that many bytes and honors `Range`;
+/// `/media/redirect?to=<url>` answers a `302`.
+pub(crate) const MEDIA_PREFIX: &str = "/media/";
+
+fn media_reply(rest: &str, headers: &[(String, String)]) -> Reply {
+	if let Some(query) = rest.strip_prefix("redirect?to=") {
+		return Reply {
+			status: "302 Found",
+			content_type: "text/plain",
+			extra: vec![("location", query.to_owned())],
+			body: Vec::new(),
+		};
+	}
+
+	let length: usize = rest
+		.split('?')
+		.next()
+		.unwrap_or(rest)
+		.parse()
+		.unwrap_or_default();
+	let full: Vec<u8> = (0..length).map(|i| i as u8).collect();
+
+	let range = headers
+		.iter()
+		.find(|(name, _)| name == "range")
+		.and_then(|(_, value)| value.strip_prefix("bytes="))
+		.and_then(|value| value.split_once('-'));
+	let Some((start, end)) = range else {
+		return Reply {
+			status: "200 OK",
+			content_type: "image/jpeg",
+			extra: vec![("accept-ranges", "bytes".to_owned())],
+			body: full,
+		};
+	};
+
+	let start: usize = start.parse().unwrap_or_default();
+	let end: usize = end.parse().unwrap_or(length.saturating_sub(1));
+	let slice =
+		full[start.min(length)..=end.min(length.saturating_sub(1))].to_vec();
+	Reply {
+		status: "206 Partial Content",
+		content_type: "video/mp4",
+		extra: vec![
+			("accept-ranges", "bytes".to_owned()),
+			("content-range", format!("bytes {start}-{end}/{length}")),
+		],
+		body: slice,
+	}
 }
 
 fn respond(path: &str) -> (&'static str, String) {

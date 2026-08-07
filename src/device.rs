@@ -5,327 +5,410 @@ struct DeviceProfile {
 	device_model: &'static str,
 	screen_resolution: &'static str,
 	total_ram: &'static str,
-	min_android: u8,
-	max_android: u8,
+	builds: &'static [(u8, &'static str)],
 }
 
 const DEVICE_PROFILES: &[DeviceProfile] = &[
-	// Google Pixel
+	// Google
 	DeviceProfile {
 		manufacturer: "Google",
 		device_model: "Pixel 6",
 		screen_resolution: "2400x1080",
 		total_ram: "8026152960",
-		min_android: 12,
-		max_android: 15,
+		builds: &[
+			(12, "SQ1D.220205.004"),
+			(13, "TQ3A.230901.001"),
+			(14, "AP2A.240905.003.F1"),
+			(15, "BP1A.250505.005"),
+			(16, "CP1A.260405.005"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "Google",
 		device_model: "Pixel 6 Pro",
 		screen_resolution: "3120x1440",
 		total_ram: "12017676288",
-		min_android: 12,
-		max_android: 15,
+		builds: &[
+			(12, "SQ1D.220205.004"),
+			(13, "TQ3A.230901.001"),
+			(14, "AP2A.240905.003.F1"),
+			(15, "BP1A.250505.005"),
+			(16, "CP1A.260405.005"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "Google",
 		device_model: "Pixel 6a",
 		screen_resolution: "2400x1080",
 		total_ram: "5938152960",
-		min_android: 12,
-		max_android: 15,
+		builds: &[
+			(12, "SD2A.220601.004"),
+			(13, "TQ3A.230805.001"),
+			(14, "AP2A.240905.003.F1"),
+			(15, "BP1A.250505.005"),
+			(16, "CP1A.260405.005"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "Google",
 		device_model: "Pixel 7",
 		screen_resolution: "2400x1080",
 		total_ram: "8026152960",
-		min_android: 13,
-		max_android: 16,
+		builds: &[
+			(13, "TQ3A.230901.001"),
+			(14, "AP2A.240905.003"),
+			(15, "BP1A.250505.005.B1"),
+			(16, "CP1A.260405.005"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "Google",
 		device_model: "Pixel 7 Pro",
 		screen_resolution: "3120x1440",
 		total_ram: "12017676288",
-		min_android: 13,
-		max_android: 16,
+		builds: &[
+			(13, "TQ3A.230901.001"),
+			(14, "AP2A.240905.003"),
+			(15, "BP1A.250505.005.B1"),
+			(16, "CP1A.260405.005"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "Google",
 		device_model: "Pixel 7a",
 		screen_resolution: "2400x1080",
 		total_ram: "8026152960",
-		min_android: 13,
-		max_android: 16,
+		builds: &[
+			(13, "TQ3A.230901.001"),
+			(14, "AP2A.240905.003"),
+			(15, "BP1A.250505.005.B1"),
+			(16, "CP1A.260505.005"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "Google",
 		device_model: "Pixel 8",
 		screen_resolution: "2400x1080",
 		total_ram: "8026152960",
-		min_android: 14,
-		max_android: 16,
+		builds: &[
+			(14, "AP2A.240905.003"),
+			(15, "BP1A.250505.005.B1"),
+			(16, "CP1A.260505.005"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "Google",
 		device_model: "Pixel 8 Pro",
 		screen_resolution: "2992x1344",
 		total_ram: "12017676288",
-		min_android: 14,
-		max_android: 16,
+		builds: &[
+			(14, "AP2A.240905.003"),
+			(15, "BP1A.250505.005.B1"),
+			(16, "CP1A.260505.005"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "Google",
 		device_model: "Pixel 8a",
 		screen_resolution: "2400x1080",
 		total_ram: "8026152960",
-		min_android: 14,
-		max_android: 16,
+		builds: &[
+			(14, "AP2A.240905.003.A1"),
+			(15, "BP1A.250505.005.B1"),
+			(16, "CP1A.260505.005"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "Google",
 		device_model: "Pixel 9",
 		screen_resolution: "2424x1080",
 		total_ram: "12017676288",
-		min_android: 14,
-		max_android: 16,
+		builds: &[
+			(14, "AD1A.240905.004"),
+			(15, "BP1A.250505.005"),
+			(16, "CP1A.260505.005"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "Google",
 		device_model: "Pixel 9 Pro",
 		screen_resolution: "2856x1280",
 		total_ram: "16065654784",
-		min_android: 14,
-		max_android: 16,
+		builds: &[
+			(14, "AD1A.240905.004"),
+			(15, "BP1A.250505.005"),
+			(16, "CP1A.260505.005"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "Google",
 		device_model: "Pixel 9 Pro XL",
 		screen_resolution: "2992x1344",
 		total_ram: "16065654784",
-		min_android: 14,
-		max_android: 16,
+		builds: &[
+			(14, "AD1A.240905.004"),
+			(15, "BP1A.250505.005"),
+			(16, "CP1A.260505.005"),
+		],
 	},
-	// Samsung
+	// samsung
 	DeviceProfile {
 		manufacturer: "samsung",
 		device_model: "SM-S901B",
 		screen_resolution: "2340x1080",
 		total_ram: "8026152960",
-		min_android: 12,
-		max_android: 16,
+		builds: &[
+			(12, "SP1A.210812.016"),
+			(13, "TP1A.220624.014"),
+			(14, "UP1A.231005.007"),
+			(15, "AP3A.240905.015.A2"),
+			(16, "BP2A.250605.031.A3"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "samsung",
 		device_model: "SM-S906B",
 		screen_resolution: "2340x1080",
 		total_ram: "8026152960",
-		min_android: 12,
-		max_android: 16,
+		builds: &[
+			(12, "SP1A.210812.016"),
+			(13, "TP1A.220624.014"),
+			(14, "UP1A.231005.007"),
+			(15, "AP3A.240905.015.A2"),
+			(16, "BP2A.250605.031.A3"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "samsung",
 		device_model: "SM-S908B",
 		screen_resolution: "3088x1440",
 		total_ram: "12017676288",
-		min_android: 12,
-		max_android: 16,
+		builds: &[
+			(12, "SP1A.210812.016"),
+			(13, "TP1A.220624.014"),
+			(14, "UP1A.231005.007"),
+			(15, "AP3A.240905.015.A2"),
+			(16, "BP2A.250605.031.A3"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "samsung",
 		device_model: "SM-S911B",
 		screen_resolution: "2340x1080",
 		total_ram: "8026152960",
-		min_android: 13,
-		max_android: 16,
+		builds: &[
+			(13, "TP1A.220624.014"),
+			(14, "UP1A.231005.007"),
+			(15, "AP3A.240905.015.A2"),
+			(16, "BP2A.250605.031.A3"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "samsung",
 		device_model: "SM-S916B",
 		screen_resolution: "2340x1080",
 		total_ram: "8026152960",
-		min_android: 13,
-		max_android: 16,
+		builds: &[
+			(13, "TP1A.220624.014"),
+			(14, "UP1A.231005.007"),
+			(15, "AP3A.240905.015.A2"),
+			(16, "BP2A.250605.031.A3"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "samsung",
 		device_model: "SM-S918B",
 		screen_resolution: "3088x1440",
 		total_ram: "12017676288",
-		min_android: 13,
-		max_android: 16,
+		builds: &[
+			(13, "TP1A.220624.014"),
+			(14, "UP1A.231005.007"),
+			(15, "AP3A.240905.015.A2"),
+			(16, "BP2A.250605.031.A3"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "samsung",
 		device_model: "SM-S921B",
 		screen_resolution: "2340x1080",
 		total_ram: "8026152960",
-		min_android: 14,
-		max_android: 16,
+		builds: &[
+			(14, "UP1A.231005.007"),
+			(15, "AP3A.240905.015.A2"),
+			(16, "BP2A.250605.031.A3"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "samsung",
 		device_model: "SM-S926B",
 		screen_resolution: "2340x1080",
 		total_ram: "12017676288",
-		min_android: 14,
-		max_android: 16,
+		builds: &[
+			(14, "UP1A.231005.007"),
+			(15, "AP3A.240905.015.A2"),
+			(16, "BP2A.250605.031.A3"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "samsung",
 		device_model: "SM-S928B",
 		screen_resolution: "3120x1440",
 		total_ram: "12017676288",
-		min_android: 14,
-		max_android: 16,
+		builds: &[
+			(14, "UP1A.231005.007"),
+			(15, "AP3A.240905.015.A2"),
+			(16, "BP2A.250605.031.A3"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "samsung",
 		device_model: "SM-A546B",
 		screen_resolution: "2340x1080",
 		total_ram: "8026152960",
-		min_android: 13,
-		max_android: 16,
+		builds: &[
+			(13, "TP1A.220624.014"),
+			(14, "UP1A.231005.007"),
+			(15, "AP3A.240905.015.A2"),
+			(16, "BP2A.250605.031.A3"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "samsung",
 		device_model: "SM-A346B",
 		screen_resolution: "2340x1080",
 		total_ram: "8026152960",
-		min_android: 13,
-		max_android: 16,
+		builds: &[
+			(13, "TP1A.220624.014"),
+			(14, "UP1A.231005.007"),
+			(15, "AP3A.240905.015.A2"),
+			(16, "BP2A.250605.031.A3"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "samsung",
 		device_model: "SM-A145F",
 		screen_resolution: "2408x1080",
 		total_ram: "3852152832",
-		min_android: 13,
-		max_android: 15,
+		builds: &[
+			(13, "TP1A.220624.014"),
+			(14, "UP1A.231005.007"),
+			(15, "AP3A.240905.015.A2"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "samsung",
 		device_model: "SM-F731B",
 		screen_resolution: "2640x1080",
 		total_ram: "8026152960",
-		min_android: 13,
-		max_android: 16,
+		builds: &[
+			(13, "TP1A.220624.014"),
+			(14, "UP1A.231005.007"),
+			(15, "AP3A.240905.015.A2"),
+			(16, "BP2A.250605.031.A3"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "samsung",
 		device_model: "SM-F946B",
 		screen_resolution: "2176x1812",
 		total_ram: "12017676288",
-		min_android: 13,
-		max_android: 16,
+		builds: &[
+			(13, "TP1A.220624.014"),
+			(14, "UP1A.231005.007"),
+			(15, "AP3A.240905.015.A2"),
+			(16, "BP2A.250605.031.A3"),
+		],
 	},
-	// Xiaomi / Redmi / POCO
+	// Xiaomi
 	DeviceProfile {
 		manufacturer: "Xiaomi",
 		device_model: "2201123G",
 		screen_resolution: "2400x1080",
 		total_ram: "8026152960",
-		min_android: 12,
-		max_android: 15,
+		builds: &[
+			(12, "SKQ1.211006.001"),
+			(13, "TKQ1.220807.001"),
+			(14, "UKQ1.230917.001"),
+			(15, "AQ3A.241006.001"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "Xiaomi",
 		device_model: "2211133G",
 		screen_resolution: "2400x1080",
 		total_ram: "8026152960",
-		min_android: 13,
-		max_android: 16,
+		builds: &[
+			(13, "TKQ1.220905.001"),
+			(14, "UKQ1.230804.001"),
+			(15, "AQ3A.240912.001"),
+			(16, "BP2A.250605.031.A3"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "Xiaomi",
 		device_model: "23078PND5G",
 		screen_resolution: "2712x1220",
 		total_ram: "8026152960",
-		min_android: 13,
-		max_android: 16,
+		builds: &[(13, "TP1A.220624.014"), (14, "UP1A.230905.011")],
 	},
 	DeviceProfile {
 		manufacturer: "Xiaomi",
 		device_model: "23127PN0CG",
 		screen_resolution: "2670x1200",
 		total_ram: "12017676288",
-		min_android: 14,
-		max_android: 16,
+		builds: &[
+			(14, "UKQ1.230804.001"),
+			(15, "AQ3A.240627.003"),
+			(16, "BP2A.250605.031.A3"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "Xiaomi",
 		device_model: "23021RAA2Y",
 		screen_resolution: "2400x1080",
 		total_ram: "3852152832",
-		min_android: 13,
-		max_android: 15,
+		builds: &[
+			(13, "TKQ1.221114.001"),
+			(14, "UKQ1.230917.001"),
+			(15, "AQ3A.240829.003"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "Xiaomi",
 		device_model: "23117RA68G",
 		screen_resolution: "2712x1220",
 		total_ram: "8026152960",
-		min_android: 13,
-		max_android: 16,
+		builds: &[
+			(13, "TP1A.220624.014"),
+			(14, "UP1A.231005.007"),
+			(15, "AP3A.240905.015.A2"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "Xiaomi",
 		device_model: "23049PCD8G",
 		screen_resolution: "2400x1080",
 		total_ram: "8026152960",
-		min_android: 13,
-		max_android: 16,
+		builds: &[(13, "TKQ1.221114.001"), (14, "UKQ1.230804.001")],
 	},
-	// OnePlus
-	DeviceProfile {
-		manufacturer: "OnePlus",
-		device_model: "NE2213",
-		screen_resolution: "3216x1440",
-		total_ram: "8026152960",
-		min_android: 12,
-		max_android: 15,
-	},
-	DeviceProfile {
-		manufacturer: "OnePlus",
-		device_model: "CPH2449",
-		screen_resolution: "3216x1440",
-		total_ram: "8026152960",
-		min_android: 13,
-		max_android: 16,
-	},
-	DeviceProfile {
-		manufacturer: "OnePlus",
-		device_model: "CPH2581",
-		screen_resolution: "3168x1440",
-		total_ram: "12017676288",
-		min_android: 14,
-		max_android: 16,
-	},
-	DeviceProfile {
-		manufacturer: "OnePlus",
-		device_model: "CPH2491",
-		screen_resolution: "2772x1240",
-		total_ram: "8026152960",
-		min_android: 13,
-		max_android: 16,
-	},
-	// Motorola
+	// motorola
 	DeviceProfile {
 		manufacturer: "motorola",
 		device_model: "motorola edge 40",
 		screen_resolution: "2400x1080",
 		total_ram: "8026152960",
-		min_android: 13,
-		max_android: 16,
+		builds: &[(13, "T2TL33.3-41-2")],
 	},
 	DeviceProfile {
 		manufacturer: "motorola",
-		device_model: "motorola g84 5G",
+		device_model: "moto g84 5G",
 		screen_resolution: "2400x1080",
 		total_ram: "8026152960",
-		min_android: 13,
-		max_android: 15,
+		builds: &[
+			(13, "T3TC33.18-12-3"),
+			(14, "U1TC34.22-64-6"),
+			(15, "V1TC35H.88-16"),
+		],
 	},
 	// Nothing
 	DeviceProfile {
@@ -333,16 +416,18 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[
 		device_model: "A065",
 		screen_resolution: "2412x1080",
 		total_ram: "12017676288",
-		min_android: 13,
-		max_android: 16,
+		builds: &[
+			(13, "TKQ1.221220.001"),
+			(14, "UP1A.231005.007"),
+			(15, "AQ3A.240912.001"),
+		],
 	},
 	DeviceProfile {
 		manufacturer: "Nothing",
 		device_model: "A142",
 		screen_resolution: "2412x1080",
 		total_ram: "8026152960",
-		min_android: 14,
-		max_android: 16,
+		builds: &[(14, "UP1A.231005.007"), (15, "AP3A.240617.008")],
 	},
 ];
 
@@ -408,6 +493,8 @@ pub struct DeviceInfo {
 	pub locale: String,
 	/// `Accept-Language` value, e.g. `"en-US"`.
 	pub accept_language: String,
+	#[serde(default)]
+	pub build_id: String,
 }
 
 impl DeviceInfo {
@@ -419,8 +506,8 @@ impl DeviceInfo {
 		let timezone =
 			SAFE_TIMEZONES[rand::random_range(0..SAFE_TIMEZONES.len())];
 		let device_id = format!("{:016x}", rand::random::<u64>());
-		let android_version =
-			rand::random_range(profile.min_android..=profile.max_android);
+		let (android_version, build_id) =
+			profile.builds[rand::random_range(0..profile.builds.len())];
 
 		Self {
 			device_type: 2,
@@ -434,6 +521,7 @@ impl DeviceInfo {
 			timezone: timezone.to_owned(),
 			locale: "en_US".to_owned(),
 			accept_language: "en-US".to_owned(),
+			build_id: build_id.to_owned(),
 		}
 	}
 }
@@ -457,14 +545,45 @@ mod tests {
 	}
 
 	#[test]
-	fn android_version_range_is_sane() {
+	fn every_profile_offers_at_least_one_real_build() {
 		for p in DEVICE_PROFILES {
 			assert!(
-				p.min_android <= p.max_android,
-				"{} has min_android ({}) > max_android ({})",
+				!p.builds.is_empty(),
+				"{} has no build ids, so it cannot produce a platform user agent",
 				p.device_model,
-				p.min_android,
-				p.max_android,
+			);
+			for (version, build_id) in p.builds {
+				assert!(
+					(12..=16).contains(version),
+					"{} lists android {version}",
+					p.device_model,
+				);
+				assert!(
+					!build_id.is_empty(),
+					"{} has an empty build id for android {version}",
+					p.device_model,
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn a_generated_device_always_carries_its_build_id() {
+		for _ in 0..200 {
+			let d = DeviceInfo::generate();
+			let profile = DEVICE_PROFILES
+				.iter()
+				.find(|p| p.device_model == d.device_model)
+				.expect("generated model is a known profile");
+			let version: u8 =
+				d.os.trim_start_matches("Android ")
+					.parse()
+					.expect("os is `Android <major>`");
+			assert!(
+				profile.builds.contains(&(version, d.build_id.as_str())),
+				"{} android {version} build {} is not a listed pair",
+				d.device_model,
+				d.build_id,
 			);
 		}
 	}

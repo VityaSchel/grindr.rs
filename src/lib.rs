@@ -66,9 +66,10 @@ pub use client::{probe_emulation, GrindrClient};
 pub use device::DeviceInfo;
 pub use error::{BanInfo, BanKind, BlockKind, GrindrError};
 pub use headers::{
-	build_device_info_header, build_user_agent, GrindrHeaders, APP_VERSION,
+	build_device_info_header, build_platform_user_agent, build_user_agent,
+	GrindrHeaders, APP_VERSION,
 };
-pub use media::{MediaRequest, MediaResponse};
+pub use media::{MediaFetcher, MediaRequest, MediaResponse};
 pub use rest::RawResponse;
 pub use signing::{
 	requires_device_signature, DeviceSigningKey, MediaUploadResponse,

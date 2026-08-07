@@ -11,6 +11,16 @@ use crate::rest::InnerClient;
 const MEDIA_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_REDIRECTS: usize = 5;
 
+/// Which of the app's two HTTP stacks a fetch imitates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MediaFetcher {
+	/// The image loader, used for photos and chat images.
+	#[default]
+	ImageLoader,
+	/// `android.media.MediaPlayer`, used for album video.
+	MediaPlayer,
+}
+
 /// Argument of [`GrindrClient::fetch_media`](crate::GrindrClient::fetch_media).
 #[derive(Debug, Clone, Copy)]
 pub struct MediaRequest<'a> {
@@ -20,6 +30,8 @@ pub struct MediaRequest<'a> {
 	pub range: Option<&'a str>,
 	/// Body size ceiling. A larger response fails instead of being buffered.
 	pub max_bytes: usize,
+	/// Which header set to send.
+	pub fetcher: MediaFetcher,
 }
 
 /// Result of [`GrindrClient::fetch_media`](crate::GrindrClient::fetch_media).
@@ -84,8 +96,14 @@ impl InnerClient {
 		}
 
 		let fp = self.fingerprint().await;
-		let headers =
-			GrindrHeaders::build_media(&fp.user_agent, request.range)?;
+		let headers = match request.fetcher {
+			MediaFetcher::ImageLoader => {
+				GrindrHeaders::build_media(&fp.user_agent, request.range)?
+			}
+			MediaFetcher::MediaPlayer => {
+				GrindrHeaders::build_platform_media(&fp.device, request.range)?
+			}
+		};
 
 		let mut req = fp.http.request(Method::GET, url);
 		for (name, value) in headers.items {
@@ -166,6 +184,7 @@ mod tests {
 			url,
 			range: None,
 			max_bytes: 1024 * 1024,
+			fetcher: MediaFetcher::ImageLoader,
 		}
 	}
 
@@ -211,6 +230,45 @@ mod tests {
 
 		assert_eq!(header_names(&headers), &["accept", "user-agent", "range"]);
 		assert_eq!(header_value(&headers, "range"), Some("bytes=10-19"));
+	}
+
+	#[test]
+	fn platform_media_headers_are_the_dalvik_ua_and_nothing_else() {
+		let device = DeviceInfo::generate();
+
+		let headers =
+			GrindrHeaders::build_platform_media(&device, None).unwrap();
+
+		assert_eq!(header_names(&headers), &["user-agent", "accept-encoding"]);
+		assert_eq!(
+			header_value(&headers, "user-agent"),
+			Some(crate::build_platform_user_agent(&device).as_str()),
+			"MediaPlayer sends no Accept at all"
+		);
+	}
+
+	#[tokio::test]
+	async fn album_video_goes_out_as_the_platform_stack() {
+		let url = media_url(5);
+
+		signed_in_client()
+			.fetch_media(MediaRequest {
+				fetcher: MediaFetcher::MediaPlayer,
+				..request(&url)
+			})
+			.await
+			.unwrap();
+
+		let recorded = testserver::requests_to(&format!("{MEDIA_PREFIX}5"));
+		let fetch = recorded.first().expect("the media request was made");
+		assert!(
+			fetch.header("user-agent").is_some_and(|ua| {
+				ua.starts_with("Dalvik/") && ua.contains(" Build/")
+			}),
+			"got {:?}",
+			fetch.header("user-agent")
+		);
+		assert_eq!(fetch.header("accept"), None);
 	}
 
 	#[test]

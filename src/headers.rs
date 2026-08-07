@@ -27,6 +27,23 @@ pub fn build_user_agent(
 	)
 }
 
+/// `java.vm.version`, `2.1.0` on every current Android release.
+const VM_VERSION: &str = "2.1.0";
+
+/// Builds the `User-Agent` the platform's own HTTP stack sends, e.g.
+/// `Dalvik/2.1.0 (Linux; U; Android 14; Pixel 8 Build/AP2A.240905.003)`.
+///
+/// Album video is played by `android.media.MediaPlayer`, which goes out over
+/// `HttpURLConnection` and sends this instead of the app's `User-Agent`.
+///
+/// References <https://opengrind.org/grindr-api/media#cdn-request-headers>
+pub fn build_platform_user_agent(device: &DeviceInfo) -> String {
+	format!(
+		"Dalvik/{VM_VERSION} (Linux; U; {}; {} Build/{})",
+		device.os, device.device_model, device.build_id
+	)
+}
+
 /// Builds the `L-Device-Info` header value from a [`DeviceInfo`].
 pub fn build_device_info_header(device: &DeviceInfo) -> String {
 	format!(
@@ -133,6 +150,29 @@ impl GrindrHeaders {
 			HeaderName::from_static("user-agent"),
 			HeaderValue::from_str(user_agent).map_err(invalid_header)?,
 		));
+		Self::finish_media(items, range)
+	}
+
+	/// Build the header set `android.media.MediaPlayer` sends: the platform
+	/// `User-Agent` and no `Accept` at all.
+	///
+	/// References <https://opengrind.org/grindr-api/media#cdn-request-headers>
+	pub fn build_platform_media(
+		device: &DeviceInfo,
+		range: Option<&str>,
+	) -> Result<Self, GrindrError> {
+		let items = vec![(
+			HeaderName::from_static("user-agent"),
+			HeaderValue::from_str(&build_platform_user_agent(device))
+				.map_err(invalid_header)?,
+		)];
+		Self::finish_media(items, range)
+	}
+
+	fn finish_media(
+		mut items: Vec<(HeaderName, HeaderValue)>,
+		range: Option<&str>,
+	) -> Result<Self, GrindrError> {
 		match range {
 			Some(range) => items.push((
 				HeaderName::from_static("range"),
@@ -143,7 +183,6 @@ impl GrindrHeaders {
 				HeaderValue::from_static("gzip"),
 			)),
 		}
-
 		Ok(Self { items })
 	}
 }
@@ -169,6 +208,7 @@ mod tests {
 			timezone: "Europe/Madrid".to_owned(),
 			locale: "en_US".to_owned(),
 			accept_language: "en-US".to_owned(),
+			build_id: "AP2A.240905.003".to_owned(),
 		}
 	}
 
@@ -180,6 +220,28 @@ mod tests {
             ua,
             format!("grindr3/{APP_VERSION};{BUILD_NUMBER};Free;Android 14;Pixel 8;Google")
         );
+	}
+
+	#[test]
+	fn platform_user_agent_format() {
+		assert_eq!(
+			build_platform_user_agent(&test_device()),
+			"Dalvik/2.1.0 (Linux; U; Android 14; Pixel 8 Build/AP2A.240905.003)"
+		);
+	}
+
+	#[test]
+	fn the_platform_user_agent_shares_the_device_with_the_app_one() {
+		let device = DeviceInfo::generate();
+		let app = build_user_agent(&device, "Free");
+		let platform = build_platform_user_agent(&device);
+
+		assert!(app.contains(&device.os) && platform.contains(&device.os));
+		assert!(
+			app.contains(&device.device_model)
+				&& platform.contains(&device.device_model),
+			"a device claiming two models across the two user agents is a tell"
+		);
 	}
 
 	#[test]

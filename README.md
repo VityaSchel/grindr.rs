@@ -207,7 +207,7 @@ Everything under **Identity and session** and **Requests and errors** — except
 Every request carries its own timeout — 35 s, matching the app's okhttp `callTimeout`, and 120 s when the body is bytes, so an upload is not cut off by what is meant to be a timeout. There is no need to wrap calls in one of your own.
 
 - `RawResponse` — `{ status: u16, body: Vec<u8> }`
-- `GrindrError` — the crate error type (`Http`, `Auth`, `Api`, `Unauthorized`, `Banned`, `RateLimited`, `Blocked(BlockKind)`, `InvalidRequest`, `SessionCleared`); `GrindrError::from_response(status, body)` maps a non-success `RawResponse` the same way the typed methods do
+- `GrindrError` — the crate error type (`Http`, `Auth`, `Api`, `Unauthorized`, `Banned`, `RateLimited`, `Blocked(BlockKind)`, `InvalidRequest`, `SessionCleared`, `MediaTooLarge { max_bytes }`); `GrindrError::from_response(status, body)` maps a non-success `RawResponse` the same way the typed methods do
 - `BlockKind` — `Cloudflare` for Cloudflare block page or "Just a moment..." challenge, `Edge` for anything else
 - `BanInfo` — `{ kind, code, message, reason, sub_reason, automated }`
 - `BanKind` — `Profile` / `Device` / `Network` / `Underage`

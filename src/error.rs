@@ -86,6 +86,13 @@ pub enum GrindrError {
 	/// Signed out while this request was in flight
 	#[error("session was cleared while the request was in flight")]
 	SessionCleared,
+
+	/// A media body is larger than `MediaRequest::max_bytes` and was not buffered.
+	#[error("media body exceeds {max_bytes} bytes")]
+	MediaTooLarge {
+		/// The ceiling the request set.
+		max_bytes: usize,
+	},
 }
 
 /// What a [`GrindrError::Banned`] applies to, from the error code in the body.

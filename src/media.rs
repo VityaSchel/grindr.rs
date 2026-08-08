@@ -131,10 +131,9 @@ impl InnerClient {
 		let mut body = BytesMut::new();
 		while let Some(chunk) = response.chunk().await? {
 			if body.len() + chunk.len() > request.max_bytes {
-				return Err(GrindrError::Http(format!(
-					"media body exceeds {} bytes",
-					request.max_bytes
-				)));
+				return Err(GrindrError::MediaTooLarge {
+					max_bytes: request.max_bytes,
+				});
 			}
 			body.put(chunk);
 		}
@@ -395,7 +394,10 @@ mod tests {
 			.await
 			.unwrap_err();
 
-		assert!(matches!(err, GrindrError::Http(_)), "got {err:?}");
+		assert!(
+			matches!(err, GrindrError::MediaTooLarge { max_bytes: 512 }),
+			"got {err:?}"
+		);
 	}
 
 	#[tokio::test]

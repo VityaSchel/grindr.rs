@@ -493,6 +493,7 @@ pub struct DeviceInfo {
 	pub locale: String,
 	/// `Accept-Language` value, e.g. `"en-US"`.
 	pub accept_language: String,
+	/// Build fingerprint id, e.g. `"TQ3A.230901.001"`.
 	#[serde(default)]
 	pub build_id: String,
 }

@@ -1,9 +1,10 @@
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
+use tokio::time::Instant;
 
 use crate::error::{BanInfo, GrindrError};
 use crate::rest::InnerClient;
@@ -301,6 +302,39 @@ impl AuthRequest for RefreshRequest {
 	}
 }
 
+/// Why a token refresh failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum RefreshFailureKind {
+	/// Connection, DNS, TLS, or timeout failure; the request got no answer.
+	Transport,
+	/// A Cloudflare challenge or WAF block answered instead of the API.
+	Blocked,
+	/// The API returned `429`.
+	RateLimited,
+	/// The API returned some other non-success status.
+	Server,
+	/// The session itself is unusable; retrying will not help.
+	Session,
+}
+
+impl RefreshFailureKind {
+	/// Whether retrying the same refresh could still succeed.
+	pub fn is_transient(self) -> bool {
+		!matches!(self, Self::Session)
+	}
+
+	fn classify(error: &GrindrError) -> Self {
+		match error {
+			GrindrError::Http(_) => Self::Transport,
+			GrindrError::Blocked(_) => Self::Blocked,
+			GrindrError::RateLimited => Self::RateLimited,
+			GrindrError::Api { .. } => Self::Server,
+			_ => Self::Session,
+		}
+	}
+}
+
 /// Emitted on [`GrindrClient::auth_event_receiver`](crate::GrindrClient::auth_event_receiver)
 /// when a background token refresh changes the auth state.
 #[derive(Debug, Clone)]
@@ -310,11 +344,53 @@ pub enum AuthEvent {
 	LoggedOut,
 	/// The account is banned; session cleared.
 	Banned(BanInfo),
-	/// A transient refresh failure; the session is kept.
+	/// A refresh failed, the session is kept. Sent at most once per cooldown,
+	/// and never while [inactive](crate::GrindrClient::set_active).
+	#[non_exhaustive]
 	RefreshFailed {
 		/// What went wrong.
 		message: String,
+		/// The shape of the failure.
+		kind: RefreshFailureKind,
 	},
+	/// A refresh succeeded after a [`RefreshFailed`](Self::RefreshFailed).
+	RefreshRecovered,
+}
+
+#[derive(Default)]
+pub(crate) struct RefreshGate {
+	failures: u32,
+	retry_at: Option<Instant>,
+	reported: bool,
+}
+
+const REFRESH_COOLDOWNS: [Duration; 4] = [
+	Duration::from_secs(5),
+	Duration::from_secs(15),
+	Duration::from_secs(30),
+	Duration::from_secs(60),
+];
+
+impl RefreshGate {
+	fn blocked(&self) -> bool {
+		self.retry_at.is_some_and(|at| Instant::now() < at)
+	}
+
+	fn record_failure(&mut self) {
+		let index = (self.failures as usize).min(REFRESH_COOLDOWNS.len() - 1);
+		self.retry_at = Instant::now().checked_add(REFRESH_COOLDOWNS[index]);
+		self.failures = self.failures.saturating_add(1);
+	}
+
+	fn clear_backoff(&mut self) {
+		self.failures = 0;
+		self.retry_at = None;
+	}
+
+	fn take_owed_recovery(&mut self) -> bool {
+		self.clear_backoff();
+		std::mem::take(&mut self.reported)
+	}
 }
 
 pub(crate) struct AuthState {
@@ -323,6 +399,8 @@ pub(crate) struct AuthState {
 	pub refresh_lock: Mutex<()>,
 	pub session_tx: watch::Sender<Option<Session>>,
 	pub auth_event_tx: broadcast::Sender<AuthEvent>,
+	pub active_tx: watch::Sender<bool>,
+	pub refresh_gate: std::sync::Mutex<RefreshGate>,
 }
 
 impl AuthState {
@@ -331,12 +409,15 @@ impl AuthState {
 	) -> (Self, watch::Receiver<Option<Session>>) {
 		let (tx, rx) = watch::channel(initial.clone());
 		let (auth_event_tx, _) = broadcast::channel(16);
+		let (active_tx, _) = watch::channel(true);
 		let state = Self {
 			session: RwLock::new(initial),
 			logout_epoch: AtomicU64::new(0),
 			refresh_lock: Mutex::new(()),
 			session_tx: tx,
 			auth_event_tx,
+			active_tx,
+			refresh_gate: std::sync::Mutex::default(),
 		};
 		(state, rx)
 	}
@@ -345,17 +426,35 @@ impl AuthState {
 		self.logout_epoch.load(Ordering::SeqCst)
 	}
 
+	pub fn is_active(&self) -> bool {
+		*self.active_tx.borrow()
+	}
+
+	// `send`, unlike `send_replace`, discards the value while the websocket
+	// task has yet to subscribe.
+	pub fn set_active(&self, active: bool) {
+		let was_active = self.active_tx.send_replace(active);
+		if active && !was_active {
+			self.refresh_gate.lock().unwrap().clear_backoff();
+		}
+	}
+
 	pub async fn set_session_if_current(
 		&self,
 		session: Session,
 		epoch: u64,
 	) -> bool {
-		let mut guard = self.session.write().await;
-		if self.epoch() != epoch {
-			return false;
+		{
+			let mut guard = self.session.write().await;
+			if self.epoch() != epoch {
+				return false;
+			}
+			*guard = Some(session.clone());
+			let _ = self.session_tx.send(Some(session));
 		}
-		*guard = Some(session.clone());
-		let _ = self.session_tx.send(Some(session));
+		if self.refresh_gate.lock().unwrap().take_owed_recovery() {
+			let _ = self.auth_event_tx.send(AuthEvent::RefreshRecovered);
+		}
 		true
 	}
 
@@ -364,6 +463,7 @@ impl AuthState {
 		self.logout_epoch.fetch_add(1, Ordering::SeqCst);
 		*guard = None;
 		let _ = self.session_tx.send(None);
+		*self.refresh_gate.lock().unwrap() = RefreshGate::default();
 	}
 }
 
@@ -563,15 +663,36 @@ async fn emit_refresh_failure(auth: &AuthState, error: GrindrError) {
 			AuthEvent::Banned(info)
 		}
 		other => {
-			if auth.session.read().await.is_none() {
+			if auth.session.read().await.is_none() || !auth.is_active() {
 				return;
 			}
+			auth.refresh_gate.lock().unwrap().reported = true;
 			AuthEvent::RefreshFailed {
+				kind: RefreshFailureKind::classify(&other),
 				message: other.to_string(),
 			}
 		}
 	};
 	let _ = auth.auth_event_tx.send(event);
+}
+
+async fn refresh_gated(
+	inner: &InnerClient,
+	auth: &AuthState,
+	context: &str,
+) -> bool {
+	if auth.refresh_gate.lock().unwrap().blocked() {
+		return false;
+	}
+	match refresh_token(inner, auth, None).await {
+		Ok(_) => true,
+		Err(e) => {
+			tracing::warn!("{context} token refresh failed: {e}");
+			auth.refresh_gate.lock().unwrap().record_failure();
+			emit_refresh_failure(auth, e).await;
+			false
+		}
+	}
 }
 
 /// Refresh after an authenticated request returned `401`.
@@ -588,14 +709,7 @@ pub(crate) async fn refresh_after_unauthorized(
 		Some(_) => {}
 	}
 
-	match refresh_token(inner, auth, None).await {
-		Ok(_) => true,
-		Err(e) => {
-			tracing::warn!("reactive token refresh failed: {e}");
-			emit_refresh_failure(auth, e).await;
-			false
-		}
-	}
+	refresh_gated(inner, auth, "reactive").await
 }
 
 pub(crate) async fn recaptcha_first_party_enabled(
@@ -631,10 +745,7 @@ pub(crate) async fn authorization_header(
 		};
 
 		if still_expired {
-			if let Err(e) = refresh_token(inner, auth, None).await {
-				tracing::warn!("token refresh failed: {e}");
-				emit_refresh_failure(auth, e).await;
-			}
+			refresh_gated(inner, auth, "proactive").await;
 		}
 	}
 
@@ -827,5 +938,171 @@ mod tests {
 			ban_details: None,
 		};
 		assert_eq!(restriction_from_claims(&claims), None);
+	}
+
+	#[test]
+	fn transport_failures_are_transient_and_session_failures_are_not() {
+		let transport = RefreshFailureKind::classify(&GrindrError::Http(
+			"reset".to_owned(),
+		));
+		assert_eq!(transport, RefreshFailureKind::Transport);
+		assert!(transport.is_transient());
+
+		assert!(RefreshFailureKind::classify(&GrindrError::RateLimited)
+			.is_transient());
+		assert!(RefreshFailureKind::classify(&GrindrError::Blocked(
+			crate::error::BlockKind::Cloudflare
+		))
+		.is_transient());
+		assert!(RefreshFailureKind::classify(&GrindrError::Api {
+			code: 500,
+			message: "boom".to_owned(),
+		})
+		.is_transient());
+
+		let session = RefreshFailureKind::classify(&GrindrError::Auth(
+			"not logged in".to_owned(),
+		));
+		assert_eq!(session, RefreshFailureKind::Session);
+		assert!(!session.is_transient());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn the_gate_backs_off_and_escalates_between_attempts() {
+		let mut gate = RefreshGate::default();
+		assert!(!gate.blocked());
+
+		gate.record_failure();
+		assert!(gate.blocked(), "a fresh failure must suppress the next try");
+
+		tokio::time::advance(Duration::from_secs(5)).await;
+		assert!(!gate.blocked(), "the first cooldown is 5s");
+
+		gate.record_failure();
+		tokio::time::advance(Duration::from_secs(5)).await;
+		assert!(
+			gate.blocked(),
+			"the second cooldown is longer than the first"
+		);
+		tokio::time::advance(Duration::from_secs(10)).await;
+		assert!(!gate.blocked());
+	}
+
+	#[test]
+	fn coming_back_to_the_foreground_drops_a_backoff_earned_in_the_background()
+	{
+		let (auth, _rx) = AuthState::new(Some(session_named("a@b.c")));
+		auth.set_active(false);
+
+		auth.refresh_gate.lock().unwrap().record_failure();
+		auth.refresh_gate.lock().unwrap().reported = true;
+		assert!(auth.refresh_gate.lock().unwrap().blocked());
+
+		auth.set_active(true);
+
+		let gate = auth.refresh_gate.lock().unwrap();
+		assert!(
+			!gate.blocked(),
+			"the resume refresh must not be skipped for failures against a \
+			 network the process no longer has"
+		);
+		assert!(gate.reported, "a recovery still owed is not forgotten");
+	}
+
+	#[test]
+	fn the_gate_owes_a_recovery_only_after_a_reported_failure() {
+		let mut gate = RefreshGate::default();
+		gate.record_failure();
+		assert!(
+			!gate.take_owed_recovery(),
+			"a failure nobody was told about owes nothing"
+		);
+
+		gate.record_failure();
+		gate.reported = true;
+		assert!(gate.take_owed_recovery());
+		assert!(
+			!gate.take_owed_recovery(),
+			"a recovery is owed exactly once"
+		);
+	}
+
+	#[tokio::test]
+	async fn a_successful_refresh_retracts_a_reported_failure() {
+		let (auth, _rx) = AuthState::new(Some(session_named("a@b.c")));
+		let mut events = auth.auth_event_tx.subscribe();
+		auth.refresh_gate.lock().unwrap().reported = true;
+
+		let epoch = auth.epoch();
+		assert!(
+			auth.set_session_if_current(session_named("a@b.c"), epoch)
+				.await
+		);
+
+		assert!(matches!(events.try_recv(), Ok(AuthEvent::RefreshRecovered)));
+	}
+
+	#[tokio::test]
+	async fn a_refresh_that_nobody_heard_about_sends_no_recovery() {
+		let (auth, _rx) = AuthState::new(Some(session_named("a@b.c")));
+		let mut events = auth.auth_event_tx.subscribe();
+
+		let epoch = auth.epoch();
+		assert!(
+			auth.set_session_if_current(session_named("a@b.c"), epoch)
+				.await
+		);
+
+		assert!(events.try_recv().is_err());
+	}
+
+	#[tokio::test]
+	async fn an_idle_client_stays_quiet_about_transport_failures() {
+		let (auth, _rx) = AuthState::new(Some(session_named("a@b.c")));
+		let mut events = auth.auth_event_tx.subscribe();
+		auth.set_active(false);
+
+		emit_refresh_failure(&auth, GrindrError::Http("no route".to_owned()))
+			.await;
+
+		assert!(events.try_recv().is_err());
+		assert!(
+			!auth.refresh_gate.lock().unwrap().reported,
+			"nothing was reported, so nothing is owed a retraction"
+		);
+	}
+
+	#[tokio::test]
+	async fn an_idle_client_still_reports_a_revoked_session() {
+		let (auth, _rx) = AuthState::new(Some(session_named("a@b.c")));
+		let mut events = auth.auth_event_tx.subscribe();
+		auth.set_active(false);
+
+		emit_refresh_failure(
+			&auth,
+			GrindrError::Unauthorized {
+				code: 401,
+				message: "revoked".to_owned(),
+			},
+		)
+		.await;
+
+		assert!(matches!(events.try_recv(), Ok(AuthEvent::LoggedOut)));
+		assert!(auth.session.read().await.is_none());
+	}
+
+	#[tokio::test]
+	async fn an_active_client_reports_a_transport_failure_with_its_kind() {
+		let (auth, _rx) = AuthState::new(Some(session_named("a@b.c")));
+		let mut events = auth.auth_event_tx.subscribe();
+
+		emit_refresh_failure(&auth, GrindrError::Http("no route".to_owned()))
+			.await;
+
+		let event = events.try_recv().unwrap();
+		let AuthEvent::RefreshFailed { kind, .. } = event else {
+			panic!("expected a RefreshFailed, got {event:?}");
+		};
+		assert_eq!(kind, RefreshFailureKind::Transport);
 	}
 }

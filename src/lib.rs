@@ -59,8 +59,8 @@ mod testserver;
 mod ws;
 
 pub use auth::{
-	AuthEvent, BanDetails, LoginResult, Restriction, Session, SessionKind,
-	VerificationRegion,
+	AuthEvent, BanDetails, LoginResult, RefreshFailureKind, Restriction,
+	Session, SessionKind, VerificationRegion,
 };
 pub use client::{probe_emulation, GrindrClient};
 pub use device::DeviceInfo;

@@ -4,6 +4,7 @@
 //! One server is shared by every test. Tests stay independent by filtering
 //! [`requests_from`] on their own generated device id.
 
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Mutex, OnceLock};
@@ -119,7 +120,7 @@ fn serve(mut stream: TcpStream) {
 	let reply = match path.strip_prefix(MEDIA_PREFIX) {
 		Some(rest) => media_reply(rest, &headers),
 		None => {
-			let (status, payload) = respond(&path);
+			let (status, payload) = respond(&path, &headers);
 			Reply {
 				status,
 				content_type: "application/json",
@@ -209,14 +210,47 @@ fn media_reply(rest: &str, headers: &[(String, String)]) -> Reply {
 	}
 }
 
-fn respond(path: &str) -> (&'static str, String) {
+type QueuedReplies = HashMap<String, VecDeque<(&'static str, String)>>;
+
+fn session_replies() -> &'static Mutex<QueuedReplies> {
+	static QUEUED: OnceLock<Mutex<QueuedReplies>> = OnceLock::new();
+	QUEUED.get_or_init(Mutex::default)
+}
+
+pub(crate) fn queue_session_replies(
+	device_id: &str,
+	replies: impl IntoIterator<Item = (&'static str, String)>,
+) {
+	session_replies()
+		.lock()
+		.unwrap()
+		.entry(device_id.to_owned())
+		.or_default()
+		.extend(replies);
+}
+
+fn queued_session_reply(
+	headers: &[(String, String)],
+) -> Option<(&'static str, String)> {
+	let device = headers
+		.iter()
+		.find(|(name, _)| name == "l-device-info")
+		.map(|(_, value)| value.as_str())?;
+	let mut queued = session_replies().lock().unwrap();
+	let key = queued.keys().find(|id| device.starts_with(*id))?.clone();
+	queued.get_mut(&key)?.pop_front()
+}
+
+fn respond(path: &str, headers: &[(String, String)]) -> (&'static str, String) {
 	match path.split('?').next().unwrap_or(path) {
-		"/v8/sessions" => (
-			"200 OK",
-			format!(
-				r#"{{"profileId":"{REFRESHED_PROFILE_ID}","sessionId":"{JWT}","authToken":"refreshed-tok"}}"#
-			),
-		),
+		"/v8/sessions" => queued_session_reply(headers).unwrap_or_else(|| {
+			(
+				"200 OK",
+				format!(
+					r#"{{"profileId":"{REFRESHED_PROFILE_ID}","sessionId":"{JWT}","authToken":"refreshed-tok"}}"#
+				),
+			)
+		}),
 		"/v1/verification/device-keys/challenge" => {
 			("200 OK", format!(r#"{{"challenge":"{CHALLENGE}"}}"#))
 		}

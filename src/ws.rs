@@ -90,6 +90,7 @@ pub(crate) fn spawn_ws_task(
 ) {
 	tokio::spawn(async move {
 		let mut session_rx = auth.session_tx.subscribe();
+		let mut active_rx = auth.active_tx.subscribe();
 		let mut backoff = Duration::from_secs(1);
 
 		loop {
@@ -102,12 +103,21 @@ pub(crate) fn spawn_ws_task(
 				}
 			}
 
+			if !*active_rx.borrow_and_update() {
+				let _ = channels.state_tx.send(WsConnectionState::Disconnected);
+				if active_rx.wait_for(|active| *active).await.is_err() {
+					return;
+				}
+				backoff = Duration::from_secs(1);
+			}
+
 			match connect_and_run(
 				&inner,
 				&auth,
 				&channels,
 				&mut cmd_rx,
 				&mut session_rx,
+				&mut active_rx,
 			)
 			.await
 			{
@@ -120,6 +130,11 @@ pub(crate) fn spawn_ws_task(
 					tracing::warn!("[ws] auth error, waiting for next login");
 					let _ =
 						channels.state_tx.send(WsConnectionState::Disconnected);
+					// A backing-off refresh fails without touching the network,
+					// so continuing straight on would spin.
+					if session_rx.changed().await.is_err() {
+						return;
+					}
 					backoff = Duration::from_secs(1);
 				}
 				Err(e) => {
@@ -147,6 +162,7 @@ async fn connect_and_run(
 	channels: &WsChannels,
 	cmd_rx: &mut mpsc::Receiver<WsCommand>,
 	session_rx: &mut watch::Receiver<Option<Session>>,
+	active_rx: &mut watch::Receiver<bool>,
 ) -> Result<(), GrindrError> {
 	let authorization = crate::auth::authorization_header(inner, auth)
 		.await
@@ -181,8 +197,15 @@ async fn connect_and_run(
 
 	let _ = channels.state_tx.send(WsConnectionState::Connected);
 
-	run_message_loop(&mut ws, cmd_rx, auth, session_rx, &channels.event_tx)
-		.await
+	run_message_loop(
+		&mut ws,
+		cmd_rx,
+		auth,
+		session_rx,
+		active_rx,
+		&channels.event_tx,
+	)
+	.await
 }
 
 async fn session_token(auth: &AuthState) -> Option<String> {
@@ -198,6 +221,7 @@ async fn run_message_loop(
 	cmd_rx: &mut mpsc::Receiver<WsCommand>,
 	auth: &AuthState,
 	session_rx: &mut watch::Receiver<Option<Session>>,
+	active_rx: &mut watch::Receiver<bool>,
 	event_tx: &broadcast::Sender<WsEvent>,
 ) -> Result<(), GrindrError> {
 	if session_token(auth).await.is_none() {
@@ -220,6 +244,11 @@ async fn run_message_loop(
 			changed = session_rx.changed() => {
 				let logged_out = changed.is_err() || session_rx.borrow_and_update().is_none();
 				if logged_out {
+					return Ok(());
+				}
+			}
+			changed = active_rx.changed() => {
+				if changed.is_err() || !*active_rx.borrow_and_update() {
 					return Ok(());
 				}
 			}

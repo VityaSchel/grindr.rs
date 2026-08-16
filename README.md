@@ -187,6 +187,8 @@ Signed uploads register an ephemeral P-256 device key on first use. Persist it t
 | --------------------------------------------------------- | ----------------------------------------------------------- |
 | `session_receiver() -> watch::Receiver<Option<Session>>`  | Watch the current session (updates on login/refresh/logout) |
 | `auth_event_receiver() -> broadcast::Receiver<AuthEvent>` | Subscribe to background token refresh failures              |
+| `set_active(bool)` / `is_active() -> bool`                | Follow the host app between foreground and background       |
+| `reset_transport()`                                       | Drop the connection pool, keeping the device and session    |
 
 ### Types
 
@@ -211,7 +213,8 @@ Every request carries its own timeout — 35 s, matching the app's okhttp `callT
 - `BlockKind` — `Cloudflare` for Cloudflare block page or "Just a moment..." challenge, `Edge` for anything else
 - `BanInfo` — `{ kind, code, message, reason, sub_reason, automated }`
 - `BanKind` — `Profile` / `Device` / `Network` / `Underage`
-- `AuthEvent` — `LoggedOut` / `Banned(BanInfo)` / `RefreshFailed { message }` from background refreshes
+- `AuthEvent` — `LoggedOut` / `Banned(BanInfo)` / `RefreshFailed { message, kind }` / `RefreshRecovered` from background refreshes
+- `RefreshFailureKind` — why a refresh failed: `Transport` / `Blocked` / `RateLimited` / `Server` / `Session`, with `is_transient()`
 
 **Uploads**
 

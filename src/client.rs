@@ -319,6 +319,33 @@ impl GrindrClient {
 		self.ws_state_rx.clone()
 	}
 
+	/// Marks the client active or idle; clients start active. Set `false` while
+	/// the host app is backgrounded.
+	///
+	/// Idle, the websocket disconnects and stops reconnecting and a failed
+	/// refresh raises no [`RefreshFailed`](crate::AuthEvent::RefreshFailed),
+	/// terminal events and REST calls are unaffected. Returning to active
+	/// reconnects at once.
+	pub fn set_active(&self, active: bool) {
+		self.auth.set_active(active);
+	}
+
+	/// Whether the client is [active](Self::set_active).
+	pub fn is_active(&self) -> bool {
+		self.auth.is_active()
+	}
+
+	/// Drops the connection pool and TLS session cache, keeping the device
+	/// identity, the session, and the signing key. Worth calling on resume:
+	/// sockets that idled through a suspend are often dead with neither end
+	/// having noticed, stalling the first request that inherits one.
+	pub async fn reset_transport(&self) -> Result<(), GrindrError> {
+		let device = self.inner.fingerprint().await.device.clone();
+		let fingerprint = build_fingerprint(device)?;
+		*self.inner.fingerprint.write().await = fingerprint;
+		Ok(())
+	}
+
 	/// Subscribes to incoming [`WsEvent`]s (messages, taps, presence). You only
 	/// get events sent after you subscribe.
 	pub fn ws_receiver(&self) -> broadcast::Receiver<WsEvent> {
@@ -752,6 +779,111 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn a_failing_refresh_is_reported_once_then_retracted_on_recovery() {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		crate::testserver::queue_session_replies(
+			&device_id,
+			[("503 Service Unavailable", "{}".to_owned())],
+		);
+		let client =
+			GrindrClient::new(device, Some(expired_session())).unwrap();
+		let mut events = client.auth_event_receiver();
+
+		client
+			.request_authenticated_raw(Method::GET, "/v3/bootstrap", None)
+			.await
+			.unwrap();
+
+		let event = events.try_recv().unwrap();
+		let AuthEvent::RefreshFailed { kind, .. } = event else {
+			panic!("expected a RefreshFailed, got {event:?}");
+		};
+		assert_eq!(kind, crate::auth::RefreshFailureKind::Server);
+
+		client.refresh_token().await.unwrap();
+		assert!(matches!(events.try_recv(), Ok(AuthEvent::RefreshRecovered)));
+	}
+
+	#[tokio::test]
+	async fn a_burst_of_calls_on_a_dead_network_refreshes_once() {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		crate::testserver::queue_session_replies(
+			&device_id,
+			std::iter::repeat_n(
+				("503 Service Unavailable", "{}".to_owned()),
+				8,
+			),
+		);
+		let client =
+			GrindrClient::new(device, Some(expired_session())).unwrap();
+
+		let calls = (0..8).map(|_| {
+			let client = client.clone();
+			async move {
+				let _ = client
+					.request_authenticated_raw(
+						Method::GET,
+						"/v3/bootstrap",
+						None,
+					)
+					.await;
+			}
+		});
+		futures_util::future::join_all(calls).await;
+
+		let refreshes = crate::testserver::requests_from(&device_id)
+			.iter()
+			.filter(|r| r.path == "/v8/sessions")
+			.count();
+		assert_eq!(
+			refreshes, 1,
+			"the cooldown must collapse the waiters queued behind the first \
+			 failed refresh, not let each one retry"
+		);
+	}
+
+	#[tokio::test]
+	async fn an_idle_client_reports_nothing_but_still_serves_rest_calls() {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		crate::testserver::queue_session_replies(
+			&device_id,
+			[("503 Service Unavailable", "{}".to_owned())],
+		);
+		let client =
+			GrindrClient::new(device, Some(expired_session())).unwrap();
+		let mut events = client.auth_event_receiver();
+		client.set_active(false);
+
+		client
+			.request_authenticated_raw(Method::GET, "/v3/bootstrap", None)
+			.await
+			.unwrap();
+
+		assert!(
+			events.try_recv().is_err(),
+			"a backgrounded app must not raise a failure the user cannot act on"
+		);
+		assert!(!client.is_active());
+		client.set_active(true);
+		assert!(client.is_active());
+	}
+
+	#[tokio::test]
+	async fn reset_transport_keeps_the_device_and_the_session() {
+		let device = DeviceInfo::generate();
+		let client =
+			GrindrClient::new(device.clone(), Some(fake_session())).unwrap();
+
+		client.reset_transport().await.unwrap();
+
+		assert_eq!(client.current_device().await.device_id, device.device_id);
+		assert!(client.session_receiver().borrow().is_some());
+	}
+
+	#[tokio::test]
 	async fn an_unsigned_chat_upload_registers_no_key_and_signs_nothing() {
 		let device = DeviceInfo::generate();
 		let device_id = device.device_id.clone();
@@ -901,6 +1033,14 @@ mod tests {
 		let clone = client.clone();
 		drop(client);
 		drop(clone);
+	}
+
+	fn expired_session() -> Session {
+		Session {
+			expires_at: 0,
+			session_id: "stale-sid".to_owned(),
+			..fake_session()
+		}
 	}
 
 	fn fake_session() -> Session {

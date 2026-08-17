@@ -486,7 +486,8 @@ async fn session_user_id(auth: &AuthState) -> Result<String, GrindrError> {
 		.ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))
 }
 
-const MAX_ERROR_BODY: usize = 1024;
+const MAX_ERROR_BODY: usize = 256;
+const MAX_ERROR_TITLE: usize = 100;
 
 /// A `403` whose body isn't JSON: a Cloudflare block page, a WAF custom
 /// response, or an intercepting proxy answered instead of the API. Scoped to
@@ -590,22 +591,62 @@ fn extract_api_error(bytes: &[u8], http_status: u16) -> (i32, String) {
 			return (code, msg.to_owned());
 		}
 	}
-	let text = String::from_utf8_lossy(bytes);
-	let truncated = if text.len() > MAX_ERROR_BODY {
-		let mut end = MAX_ERROR_BODY;
-		while end > 0 && !text.is_char_boundary(end) {
-			end -= 1;
-		}
-		format!("{}...", &text[..end])
-	} else {
-		text.into_owned()
-	};
-	let message = if truncated.is_empty() {
-		"unknown error".to_owned()
-	} else {
-		truncated
-	};
-	(http_status as i32, message)
+	(http_status as i32, summarize_error_body(bytes))
+}
+
+fn summarize_error_body(bytes: &[u8]) -> String {
+	let lossy = String::from_utf8_lossy(bytes);
+	let text = lossy.trim();
+	if text.is_empty() {
+		return "unknown error".to_owned();
+	}
+	if looks_like_markup(text) {
+		let size = bytes.len();
+		return match html_title(text) {
+			Some(title) => {
+				format!(
+					"non-JSON response (html, {size} bytes, title: {title:?})"
+				)
+			}
+			None => format!("non-JSON response (html, {size} bytes)"),
+		};
+	}
+	if text.len() <= MAX_ERROR_BODY {
+		return text.to_owned();
+	}
+	let mut end = MAX_ERROR_BODY;
+	while end > 0 && !text.is_char_boundary(end) {
+		end -= 1;
+	}
+	format!("{}...", &text[..end])
+}
+
+fn looks_like_markup(text: &str) -> bool {
+	text.starts_with('<')
+		|| find_ignore_ascii_case(text, "<html").is_some()
+		|| find_ignore_ascii_case(text, "<!doctype").is_some()
+}
+
+/// Error templates routinely give the tag attributes, as in
+/// `<title data-translate="error">`, so the opening tag ends at the next `>`.
+fn html_title(text: &str) -> Option<String> {
+	const OPEN: &str = "<title";
+	let after_name = &text[find_ignore_ascii_case(text, OPEN)? + OPEN.len()..];
+	let rest = &after_name[after_name.find('>')? + 1..];
+	let title: String = rest[..find_ignore_ascii_case(rest, "</title>")?]
+		.trim()
+		.chars()
+		.take(MAX_ERROR_TITLE)
+		.collect();
+	(!title.is_empty()).then_some(title)
+}
+
+/// An ASCII needle can only match at a char boundary, so offsets slice safely.
+fn find_ignore_ascii_case(haystack: &str, needle: &str) -> Option<usize> {
+	haystack
+		.as_bytes()
+		.windows(needle.len())
+		.position(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 #[cfg(test)]
@@ -823,6 +864,29 @@ mod tests {
 		assert!(!is_edge_block(200, WAF_CUSTOM_BLOCK_PAGE));
 	}
 
+	/// A plain upstream failure: HTML, but with no block or edge marker.
+	const UPSTREAM_HTML_ERROR_PAGE: &[u8] = br#"<!DOCTYPE html><html><head><title>502 Bad Gateway</title></head><body><center><h1>Bad Gateway</h1></center><hr><center>nginx</center></body></html>"#;
+
+	#[test]
+	fn an_unmarked_html_502_stays_an_upstream_failure() {
+		assert_eq!(block_kind(502, UPSTREAM_HTML_ERROR_PAGE), None);
+
+		let err = GrindrError::from_response(502, UPSTREAM_HTML_ERROR_PAGE);
+		let GrindrError::Api { code, message } = err else {
+			panic!("expected an Api error, got {err:?}");
+		};
+		assert_eq!(code, 502);
+		assert!(!message.contains('<'), "markup leaked: {message}");
+		assert!(!message.contains("nginx"), "page text leaked: {message}");
+		assert!(
+			message.contains("html")
+				&& message
+					.contains(&UPSTREAM_HTML_ERROR_PAGE.len().to_string())
+				&& message.contains("502 Bad Gateway"),
+			"expected a summary with size and title, got {message}"
+		);
+	}
+
 	const CLOUDFLARE_CHALLENGE_PAGE: &[u8] = br#"<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title><meta http-equiv="refresh" content="360"></head><body><div class="main-wrapper" role="main"><noscript><span id="challenge-error-text">Enable JavaScript and cookies to continue</span></noscript></div><script nonce="UWPAt20YJwDjVxfZvpSJVX">(function(){window._cf_chl_opt = {cRay: 'a1fbdcf40dd6851a',cType: 'interactive',cZone: 'grindr.mobi'};var a = document.createElement('script');a.src = '/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=a1fbdcf40dd6851a';document.getElementsByTagName('head')[0].appendChild(a);}());</script></body></html>"#;
 
 	#[test]
@@ -924,6 +988,42 @@ mod tests {
 		assert!(
 			matches!(err, GrindrError::Api { code: 500, ref message } if message == "unknown error"),
 			"got {err:?}"
+		);
+	}
+
+	#[test]
+	fn a_json_body_without_a_message_is_not_dumped_whole() {
+		let body = format!(r#"{{"trace":"{}"}}"#, "x".repeat(4096));
+		let err = GrindrError::from_response(500, body.as_bytes());
+		let GrindrError::Api { message, .. } = err else {
+			panic!("expected an Api error, got {err:?}");
+		};
+		assert!(message.len() <= MAX_ERROR_BODY + 3, "{}", message.len());
+	}
+
+	#[test]
+	fn an_attributed_title_is_still_read() {
+		let page: &[u8] = br#"<!DOCTYPE html><html><head><title data-translate="error">Access denied</title></head><body>nope</body></html>"#;
+		let err = GrindrError::from_response(500, page);
+		let GrindrError::Api { message, .. } = err else {
+			panic!("expected an Api error, got {err:?}");
+		};
+		assert!(
+			message.contains("title: \"Access denied\""),
+			"expected the title to be read, got {message}"
+		);
+	}
+
+	#[test]
+	fn a_titleless_markup_body_is_still_summarized() {
+		let page: &[u8] = b"<html><body>upstream exploded</body></html>";
+		let err = GrindrError::from_response(500, page);
+		let GrindrError::Api { message, .. } = err else {
+			panic!("expected an Api error, got {err:?}");
+		};
+		assert_eq!(
+			message,
+			format!("non-JSON response (html, {} bytes)", page.len())
 		);
 	}
 

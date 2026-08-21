@@ -13,7 +13,18 @@ use crate::error::GrindrError;
 use crate::headers::GrindrHeaders;
 use crate::rest::InnerClient;
 
-const WS_URL: &str = "wss://grindr.mobi/v1/ws";
+#[cfg(not(test))]
+fn ws_url() -> String {
+	"wss://grindr.mobi/v1/ws".to_owned()
+}
+
+#[cfg(test)]
+fn ws_url() -> String {
+	format!(
+		"{}/v1/ws",
+		crate::testserver::base_url().replacen("http", "ws", 1)
+	)
+}
 
 const WS_BROADCAST_CAPACITY: usize = 256;
 
@@ -21,6 +32,10 @@ const WS_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
 /// The app's okhttp websocket client sets `pingInterval(10, SECONDS)`.
 const WS_PING_INTERVAL: Duration = Duration::from_secs(10);
+
+const SEC_WEBSOCKET_EXTENSIONS: &str = "sec-websocket-extensions";
+
+const OKHTTP_WS_EXTENSIONS: &str = "permessage-deflate";
 
 /// A command to send over the websocket.
 ///
@@ -92,6 +107,7 @@ pub(crate) fn spawn_ws_task(
 		let mut session_rx = auth.session_tx.subscribe();
 		let mut active_rx = auth.active_tx.subscribe();
 		let mut backoff = Duration::from_secs(1);
+		let mut offer_deflate = true;
 
 		loop {
 			loop {
@@ -118,6 +134,7 @@ pub(crate) fn spawn_ws_task(
 				&mut cmd_rx,
 				&mut session_rx,
 				&mut active_rx,
+				&mut offer_deflate,
 			)
 			.await
 			{
@@ -163,6 +180,7 @@ async fn connect_and_run(
 	cmd_rx: &mut mpsc::Receiver<WsCommand>,
 	session_rx: &mut watch::Receiver<Option<Session>>,
 	active_rx: &mut watch::Receiver<bool>,
+	offer_deflate: &mut bool,
 ) -> Result<(), GrindrError> {
 	let authorization = crate::auth::authorization_header(inner, auth)
 		.await
@@ -178,17 +196,31 @@ async fn connect_and_run(
 
 	let mut builder = fp
 		.ws_http
-		.websocket(WS_URL)
+		.websocket(ws_url())
 		.max_message_size(WS_MAX_MESSAGE_BYTES)
 		.max_frame_size(WS_MAX_MESSAGE_BYTES);
 	for (name, value) in &headers.items {
 		builder = builder.header(name.clone(), value.clone());
+	}
+	if *offer_deflate {
+		builder =
+			builder.header(SEC_WEBSOCKET_EXTENSIONS, OKHTTP_WS_EXTENSIONS);
 	}
 
 	let response = builder
 		.send()
 		.await
 		.map_err(|e| GrindrError::Http(format!("WS connect failed: {e}")))?;
+
+	if *offer_deflate
+		&& response.headers().contains_key(SEC_WEBSOCKET_EXTENSIONS)
+	{
+		*offer_deflate = false;
+		return Err(GrindrError::Http(
+			"server negotiated permessage-deflate; retrying without the offer"
+				.to_owned(),
+		));
+	}
 
 	let mut ws = response
 		.into_websocket()
@@ -295,5 +327,48 @@ async fn run_message_loop(
 				None => return Ok(()),
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::device::DeviceInfo;
+	use crate::GrindrClient;
+
+	#[tokio::test]
+	async fn the_upgrade_offers_the_extension_okhttp_offers() {
+		let session = Session {
+			email: "ws@test.local".to_owned(),
+			expires_at: u64::MAX,
+			profile_id: "1".to_owned(),
+			session_id: "sid".to_owned(),
+			auth_token: "atok".to_owned(),
+			kind: crate::auth::SessionKind::Email,
+			third_party_user_id: None,
+			restriction: None,
+		};
+		let client =
+			GrindrClient::new(DeviceInfo::generate(), Some(session)).unwrap();
+		client.connect().await;
+
+		let upgrade = tokio::time::timeout(Duration::from_secs(10), async {
+			loop {
+				if let Some(seen) =
+					crate::testserver::requests_to("/v1/ws").into_iter().next()
+				{
+					break seen;
+				}
+				sleep(Duration::from_millis(20)).await;
+			}
+		})
+		.await
+		.expect("the client never attempted the upgrade");
+
+		assert_eq!(
+			upgrade.header(SEC_WEBSOCKET_EXTENSIONS),
+			Some(OKHTTP_WS_EXTENSIONS),
+			"the upgrade must offer what RealWebSocket offers"
+		);
 	}
 }

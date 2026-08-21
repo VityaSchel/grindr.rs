@@ -4,8 +4,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use tokio::sync::{broadcast, mpsc, watch};
 use wreq::{
-	Client, EmulationProvider, Http2Config, Method, PseudoOrder, SettingsOrder,
-	SslCurve, TlsConfig, TlsVersion,
+	header::HeaderName, Client, EmulationProvider, Http1Config, Http2Config,
+	Method, PseudoOrder, SettingsOrder, SslCurve, TlsConfig, TlsVersion,
 };
 
 use crate::auth::{AuthEvent, AuthState, LoginResult, Session};
@@ -105,6 +105,32 @@ fn okhttp_http2_config() -> Http2Config {
 		.build()
 }
 
+static OKHTTP_WS_HEADER_ORDER: [HeaderName; 14] = [
+	HeaderName::from_static("authorization"),
+	HeaderName::from_static("l-time-zone"),
+	HeaderName::from_static("l-grindr-roles"),
+	HeaderName::from_static("l-device-info"),
+	HeaderName::from_static("accept"),
+	HeaderName::from_static("user-agent"),
+	HeaderName::from_static("l-locale"),
+	HeaderName::from_static("accept-language"),
+	HeaderName::from_static("upgrade"),
+	HeaderName::from_static("connection"),
+	HeaderName::from_static("sec-websocket-key"),
+	HeaderName::from_static("sec-websocket-version"),
+	HeaderName::from_static("sec-websocket-extensions"),
+	HeaderName::from_static("accept-encoding"),
+];
+
+fn grindr_ws_emulation() -> EmulationProvider {
+	EmulationProvider::builder()
+		.tls_config(okhttp_tls_config())
+		.http1_config(Http1Config::builder().title_case_headers(true).build())
+		.headers_order(&OKHTTP_WS_HEADER_ORDER[..])
+		.default_headers(None)
+		.build()
+}
+
 fn grindr_emulation() -> EmulationProvider {
 	EmulationProvider::builder()
 		.tls_config(okhttp_tls_config())
@@ -152,6 +178,7 @@ fn build_http_client() -> Result<Client, GrindrError> {
 fn build_ws_client() -> Result<Client, GrindrError> {
 	// Websocket endpoint is http/1.1
 	grindr_client_builder()
+		.emulation(grindr_ws_emulation())
 		.http1_only()
 		.build()
 		.map_err(Into::into)

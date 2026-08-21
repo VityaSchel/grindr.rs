@@ -78,6 +78,11 @@ const SETTINGS_ORDER: [SettingsOrder; 8] = [
 
 const OKHTTP_WINDOW_SIZE: u32 = 16 * 1024 * 1024;
 
+const OKHTTP_FIRST_STREAM_ID: u32 = 3;
+
+const OKHTTP_POOL_IDLE: Duration = Duration::from_secs(5 * 60);
+const OKHTTP_MAX_IDLE_CONNECTIONS: usize = 5;
+
 fn okhttp_tls_config() -> TlsConfig {
 	TlsConfig::builder()
 		.enable_ocsp_stapling(true)
@@ -92,6 +97,7 @@ fn okhttp_tls_config() -> TlsConfig {
 
 fn okhttp_http2_config() -> Http2Config {
 	Http2Config::builder()
+		.initial_stream_id(OKHTTP_FIRST_STREAM_ID)
 		.initial_stream_window_size(OKHTTP_WINDOW_SIZE)
 		.initial_connection_window_size(OKHTTP_WINDOW_SIZE)
 		.headers_pseudo_order(PSEUDO_ORDER)
@@ -131,6 +137,9 @@ fn grindr_client_builder() -> wreq::ClientBuilder {
 		.no_brotli()
 		.no_zstd()
 		.connect_timeout(CONNECT_TIMEOUT)
+		.pool_idle_timeout(OKHTTP_POOL_IDLE)
+		.pool_max_idle_per_host(OKHTTP_MAX_IDLE_CONNECTIONS)
+		.tcp_keepalive(None)
 }
 
 fn build_http_client() -> Result<Client, GrindrError> {

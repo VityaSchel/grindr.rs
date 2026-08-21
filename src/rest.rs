@@ -75,6 +75,42 @@ pub(crate) enum RequestBody {
 	Raw { content_type: String, bytes: Bytes },
 }
 
+const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
+
+const ACCEPT_ENCODING: &str = "accept-encoding";
+
+fn json_body<T: Serialize + ?Sized>(
+	req: RequestBuilder,
+	body: &T,
+) -> RequestBuilder {
+	req.header("content-type", JSON_CONTENT_TYPE).json(body)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum RequiredDeviceInfo {
+	Real,
+	Anonymous,
+}
+
+impl RequiredDeviceInfo {
+	fn header_name(self) -> &'static str {
+		match self {
+			Self::Real => "requirerealdeviceinfo",
+			Self::Anonymous => "requireanondeviceinfo",
+		}
+	}
+}
+
+fn apply_required_device_info(
+	req: RequestBuilder,
+	required: Option<RequiredDeviceInfo>,
+) -> RequestBuilder {
+	match required {
+		Some(variant) => req.header(variant.header_name(), "true"),
+		None => req,
+	}
+}
+
 pub(crate) struct InnerClient {
 	pub fingerprint: tokio::sync::RwLock<Arc<Fingerprint>>,
 	pub signing: tokio::sync::Mutex<Option<DeviceKey>>,
@@ -156,13 +192,44 @@ impl InnerClient {
 		body: Option<&RequestBody>,
 	) -> RequestBuilder {
 		match body {
-			Some(RequestBody::Json(b)) => req.json(b),
+			Some(RequestBody::Json(b)) => match serde_json::to_vec(b) {
+				Ok(bytes) => req
+					.header("content-type", JSON_CONTENT_TYPE)
+					.header("content-length", bytes.len().to_string())
+					.body(bytes),
+				Err(_) => json_body(req, b),
+			},
 			Some(RequestBody::Raw {
 				content_type,
 				bytes,
-			}) => req.header("content-type", content_type).body(bytes.clone()),
+			}) => req
+				.header("content-type", content_type)
+				.header("content-length", bytes.len().to_string())
+				.body(bytes.clone()),
 			None => req,
 		}
+	}
+
+	fn apply_headers_then_body(
+		req: RequestBuilder,
+		items: &[(wreq::header::HeaderName, wreq::header::HeaderValue)],
+		body: Option<&RequestBody>,
+	) -> RequestBuilder {
+		let mut req = Self::apply_headers(
+			req,
+			&items
+				.iter()
+				.filter(|(n, _)| n.as_str() != ACCEPT_ENCODING)
+				.cloned()
+				.collect::<Vec<_>>(),
+		);
+		req = Self::apply_body(req, body);
+		for (name, value) in
+			items.iter().filter(|(n, _)| n.as_str() == ACCEPT_ENCODING)
+		{
+			req = req.header(name.clone(), value.clone());
+		}
+		req
 	}
 
 	fn call_timeout(body: Option<&RequestBody>) -> Duration {
@@ -177,6 +244,7 @@ impl InnerClient {
 		method: Method,
 		path: &str,
 		body: Option<&TReq>,
+		required_device_info: Option<RequiredDeviceInfo>,
 	) -> Result<TResp, GrindrError>
 	where
 		TReq: Serialize + ?Sized,
@@ -187,14 +255,21 @@ impl InnerClient {
 		let headers =
 			GrindrHeaders::build(&fp.device, &fp.user_agent, None, None)?;
 
-		let mut req = Self::apply_headers(
-			fp.http.request(method, format!("{}{path}", base_url())),
+		let json = body
+			.map(serde_json::to_value)
+			.transpose()
+			.ok()
+			.flatten()
+			.map(RequestBody::Json);
+		let mut req = Self::apply_headers_then_body(
+			apply_required_device_info(
+				fp.http.request(method, format!("{}{path}", base_url())),
+				required_device_info,
+			),
 			&headers.items,
+			json.as_ref(),
 		);
 		req = req.timeout(CALL_TIMEOUT);
-		if let Some(b) = body {
-			req = req.json(b);
-		}
 
 		let resp = req.send().await?;
 		self.note_server_date(resp.headers());
@@ -218,14 +293,12 @@ impl InnerClient {
 		let headers =
 			GrindrHeaders::build(&fp.device, &fp.user_agent, None, None)?;
 
-		let req = Self::apply_body(
-			Self::apply_headers(
-				fp.http.request(method, format!("{}{path}", base_url())),
-				&headers.items,
-			)
-			.timeout(Self::call_timeout(body.as_ref())),
+		let req = Self::apply_headers_then_body(
+			fp.http.request(method, format!("{}{path}", base_url())),
+			&headers.items,
 			body.as_ref(),
-		);
+		)
+		.timeout(Self::call_timeout(body.as_ref()));
 
 		let resp = req.send().await?;
 		self.note_server_date(resp.headers());
@@ -263,17 +336,13 @@ impl InnerClient {
 				Some("[FREE]"),
 			)?;
 
-			let req = Self::apply_body(
-				Self::apply_headers(
-					fp.http.request(
-						method.clone(),
-						format!("{}{path}", base_url()),
-					),
-					&headers.items,
-				)
-				.timeout(Self::call_timeout(body.as_ref())),
+			let req = Self::apply_headers_then_body(
+				fp.http
+					.request(method.clone(), format!("{}{path}", base_url())),
+				&headers.items,
 				body.as_ref(),
-			);
+			)
+			.timeout(Self::call_timeout(body.as_ref()));
 
 			let resp = req.send().await?;
 			self.note_server_date(resp.headers());
@@ -1039,5 +1108,108 @@ mod tests {
 		let prefix = message.strip_suffix("...").expect("truncation suffix");
 		assert_eq!(prefix.len(), MAX_ERROR_BODY - 1);
 		assert!(prefix.chars().all(|c| c == '€'));
+	}
+
+	#[tokio::test]
+	async fn okhttp_byte_parity_on_pre_auth_requests() {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		let client = GrindrClient::new(device, None).unwrap();
+
+		client.recaptcha_first_party_enabled().await.ok();
+
+		let requests = crate::testserver::requests_from(&device_id);
+		let assignments = requests
+			.iter()
+			.find(|r| r.path == "/public/v1/assignments")
+			.expect("assignments request recorded");
+		assert_eq!(
+			assignments.header("requireanondeviceinfo"),
+			Some("true"),
+			"the public endpoint asks for anonymous device info"
+		);
+		assert_eq!(
+			assignments.headers[0].0.to_ascii_lowercase(),
+			"requireanondeviceinfo",
+			"the device-info header precedes every client header"
+		);
+	}
+
+	#[tokio::test]
+	async fn sign_in_is_marked_but_a_refresh_of_the_same_url_is_not() {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		let client = GrindrClient::new(device, None).unwrap();
+		client.login("a@b.c", "pw").await.unwrap();
+
+		let sign_in = crate::testserver::requests_from(&device_id)
+			.into_iter()
+			.find(|r| r.path == "/v8/sessions")
+			.expect("sign-in recorded");
+		assert_eq!(
+			sign_in.header("requirerealdeviceinfo"),
+			Some("true"),
+			"LoginRestService annotates sign-in with requireRealDeviceInfo"
+		);
+		assert_eq!(
+			sign_in.header("content-type"),
+			Some(JSON_CONTENT_TYPE),
+			"Moshi's media type, charset included"
+		);
+
+		let refresh_device = DeviceInfo::generate();
+		let refresh_device_id = refresh_device.device_id.clone();
+		let refreshing = GrindrClient::new(
+			refresh_device,
+			Some(crate::auth::Session::from_auth_token("a@b.c", "stored-tok")),
+		)
+		.unwrap();
+		refreshing
+			.request_authenticated_raw(Method::GET, "/v3/bootstrap", None)
+			.await
+			.unwrap();
+
+		let refresh = crate::testserver::requests_from(&refresh_device_id)
+			.into_iter()
+			.find(|r| r.path == "/v8/sessions")
+			.expect("refresh recorded");
+		assert_eq!(
+			refresh.header("requirerealdeviceinfo"),
+			None,
+			"RefreshSessionRestService posts the same URL and annotates nothing"
+		);
+	}
+
+	#[tokio::test]
+	async fn a_bodied_request_ends_with_okhttp_s_bridge_interceptor_order() {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		let client = GrindrClient::new(device, None).unwrap();
+		client.login("a@b.c", "pw").await.unwrap();
+
+		let sign_in = crate::testserver::requests_from(&device_id)
+			.into_iter()
+			.find(|r| r.path == "/v8/sessions")
+			.expect("sign-in recorded");
+		let names: Vec<String> = sign_in
+			.headers
+			.iter()
+			.map(|(n, _)| n.to_ascii_lowercase())
+			.collect();
+		let at = |n: &str| names.iter().position(|h| h == n);
+		let (ct, cl, ae) = (
+			at("content-type").expect("content-type"),
+			at("content-length").expect("content-length"),
+			at("accept-encoding").expect("accept-encoding"),
+		);
+		assert!(
+			ct < cl && cl < ae,
+			"BridgeInterceptor appends Content-Type, Content-Length, then Accept-Encoding; got {names:?}"
+		);
+		assert_eq!(
+			names.iter().filter(|h| *h == "content-length").count(),
+			1,
+			"setting content-length ourselves must not duplicate hyper's"
+		);
 	}
 }

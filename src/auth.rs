@@ -472,9 +472,15 @@ pub(crate) async fn create_session(
 	body: &impl AuthRequest,
 	kind: SessionKind,
 	third_party_user_id: Option<String>,
+	required_device_info: Option<crate::rest::RequiredDeviceInfo>,
 ) -> Result<Session, GrindrError> {
 	let resp: SessionResponse = inner
-		.request_no_auth(wreq::Method::POST, "/v8/sessions", Some(body))
+		.request_no_auth(
+			wreq::Method::POST,
+			"/v8/sessions",
+			Some(body),
+			required_device_info,
+		)
 		.await?;
 
 	let claims = decode_session_jwt(&resp.session_id)?;
@@ -505,8 +511,14 @@ pub(crate) async fn login_email(
 		geohash: geohash.map(str::to_owned),
 	};
 	let epoch = auth.epoch();
-	let session =
-		create_session(inner, &body, SessionKind::Email, None).await?;
+	let session = create_session(
+		inner,
+		&body,
+		SessionKind::Email,
+		None,
+		Some(crate::rest::RequiredDeviceInfo::Real),
+	)
+	.await?;
 	let profile_id = session.profile_id.clone();
 	let restriction = session.restriction.clone();
 	if !auth.set_session_if_current(session, epoch).await {
@@ -535,6 +547,7 @@ pub(crate) async fn google_sign_in(
 			wreq::Method::POST,
 			"/v8/sessions/thirdparty",
 			Some(&body),
+			Some(crate::rest::RequiredDeviceInfo::Real),
 		)
 		.await?;
 	let tp = parsed.authentication_response.ok_or_else(|| {
@@ -587,6 +600,7 @@ async fn refresh_third_party_session(
 			wreq::Method::POST,
 			"/v8/sessions/thirdparty",
 			Some(&body),
+			None,
 		)
 		.await?;
 	let tp = parsed.authentication_response.ok_or_else(|| {
@@ -622,7 +636,7 @@ pub(crate) async fn refresh_token(
 				token: None,
 				geohash: geohash.map(str::to_owned),
 			};
-			create_session(inner, &body, SessionKind::Email, None).await?
+			create_session(inner, &body, SessionKind::Email, None, None).await?
 		}
 		SessionKind::Google => {
 			let third_party_user_id = third_party_user_id.ok_or_else(|| {
@@ -720,6 +734,7 @@ pub(crate) async fn recaptcha_first_party_enabled(
 			wreq::Method::GET,
 			"/public/v1/assignments",
 			None,
+			Some(crate::rest::RequiredDeviceInfo::Anonymous),
 		)
 		.await?;
 	Ok(resp

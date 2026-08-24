@@ -245,7 +245,8 @@ async fn session_token(auth: &AuthState) -> Option<String> {
 		.read()
 		.await
 		.as_ref()
-		.map(|s| s.session_id.clone())
+		.and_then(|s| s.token.as_ref())
+		.map(|token| token.session_id.clone())
 }
 
 async fn run_message_loop(
@@ -339,14 +340,18 @@ mod tests {
 	#[tokio::test]
 	async fn the_upgrade_offers_the_extension_okhttp_offers() {
 		let session = Session {
-			email: "ws@test.local".to_owned(),
-			expires_at: u64::MAX,
-			profile_id: "1".to_owned(),
-			session_id: "sid".to_owned(),
-			auth_token: "atok".to_owned(),
-			kind: crate::auth::SessionKind::Email,
-			third_party_user_id: None,
-			restriction: None,
+			credentials: crate::auth::Credentials {
+				email: "ws@test.local".to_owned(),
+				profile_id: Some("1".to_owned()),
+				auth_token: "atok".to_owned(),
+				kind: crate::auth::SessionKind::Email,
+				third_party_user_id: None,
+			},
+			token: Some(crate::auth::SessionToken {
+				session_id: "sid".to_owned(),
+				expires_at: u64::MAX,
+				restriction: None,
+			}),
 		};
 		let client =
 			GrindrClient::new(DeviceInfo::generate(), Some(session)).unwrap();

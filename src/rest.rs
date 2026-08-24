@@ -140,8 +140,7 @@ impl InnerClient {
 		auth: &AuthState,
 		key: DeviceSigningKey,
 	) -> bool {
-		let known_user_id =
-			session_user_id(auth).await.ok().filter(|id| !id.is_empty());
+		let known_user_id = session_user_id(auth).await.ok().flatten();
 		if known_user_id.is_some_and(|id| id != key.user_id()) {
 			return false;
 		}
@@ -326,7 +325,8 @@ impl InnerClient {
 				.read()
 				.await
 				.as_ref()
-				.map(|s| s.session_id.clone());
+				.and_then(|s| s.token.as_ref())
+				.map(|token| token.session_id.clone());
 
 			let fp = self.fingerprint().await;
 			let headers = GrindrHeaders::build(
@@ -398,10 +398,10 @@ impl InnerClient {
 			.await
 			.ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))?;
 		match session_user_id(auth).await? {
-			id if id.is_empty() => Err(GrindrError::Auth(
+			Some(id) => Ok(id),
+			None => Err(GrindrError::Auth(
 				"session has no profile id to bind a device key to".to_owned(),
 			)),
-			id => Ok(id),
 		}
 	}
 
@@ -476,7 +476,8 @@ impl InnerClient {
 				.read()
 				.await
 				.as_ref()
-				.map(|s| s.session_id.clone());
+				.and_then(|s| s.token.as_ref())
+				.map(|token| token.session_id.clone());
 
 			let fp = self.fingerprint().await;
 			let android_id = fp.device.device_id.clone();
@@ -546,12 +547,14 @@ impl InnerClient {
 	}
 }
 
-async fn session_user_id(auth: &AuthState) -> Result<String, GrindrError> {
+async fn session_user_id(
+	auth: &AuthState,
+) -> Result<Option<String>, GrindrError> {
 	auth.session
 		.read()
 		.await
 		.as_ref()
-		.map(|s| s.profile_id.clone())
+		.map(|s| s.credentials.profile_id.clone())
 		.ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))
 }
 
@@ -724,14 +727,29 @@ mod tests {
 	use crate::auth::Session;
 	use crate::GrindrClient;
 
-	fn session_for(profile_id: &str) -> Session {
-		let mut session = Session::from_auth_token("a@b.c", "auth-tok");
-		session.profile_id = profile_id.to_owned();
-		session
+	fn session_for(profile_id: Option<&str>) -> Session {
+		Session {
+			credentials: crate::auth::Credentials {
+				email: "a@b.c".to_owned(),
+				profile_id: profile_id.map(str::to_owned),
+				auth_token: "auth-tok".to_owned(),
+				kind: crate::auth::SessionKind::Email,
+				third_party_user_id: None,
+			},
+			token: None,
+		}
 	}
 
 	fn client_signed_in_as(profile_id: &str) -> GrindrClient {
-		GrindrClient::new(DeviceInfo::generate(), Some(session_for(profile_id)))
+		GrindrClient::new(
+			DeviceInfo::generate(),
+			Some(session_for(Some(profile_id))),
+		)
+		.unwrap()
+	}
+
+	fn client_resumed_without_profile() -> GrindrClient {
+		GrindrClient::new(DeviceInfo::generate(), Some(session_for(None)))
 			.unwrap()
 	}
 
@@ -766,7 +784,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn a_token_resumed_session_accepts_a_key_before_its_first_refresh() {
-		let client = client_signed_in_as("");
+		let client = client_resumed_without_profile();
 		let key = DeviceKey::generate("42".to_owned()).export();
 
 		assert!(client.restore_signing_key(key).await);
@@ -1161,7 +1179,16 @@ mod tests {
 		let refresh_device_id = refresh_device.device_id.clone();
 		let refreshing = GrindrClient::new(
 			refresh_device,
-			Some(crate::auth::Session::from_auth_token("a@b.c", "stored-tok")),
+			Some(Session {
+				credentials: crate::auth::Credentials {
+					email: "a@b.c".to_owned(),
+					profile_id: None,
+					auth_token: "stored-tok".to_owned(),
+					kind: crate::auth::SessionKind::Email,
+					third_party_user_id: None,
+				},
+				token: None,
+			}),
 		)
 		.unwrap();
 		refreshing

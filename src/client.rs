@@ -246,12 +246,12 @@ pub struct GrindrClient {
 }
 
 impl GrindrClient {
-	/// Creates a client for a [`DeviceInfo`], optionally resuming a saved
-	/// [`Session`].
+	/// Creates a client for a [`DeviceInfo`], optionally resuming an account
+	/// from saved [`Credentials`](crate::Credentials).
 	///
-	/// Pass `None` to start logged out, or a saved session to resume without
-	/// logging in again. This is sync and needs no runtime, and it never opens
-	/// the websocket — call [`connect`](Self::connect) for that.
+	/// Pass `None` to start logged out, or `Session { credentials, token: None }`
+	/// to resume without logging in again. This is sync and needs no runtime, and
+	/// it never opens the websocket — call [`connect`](Self::connect) for that.
 	pub fn new(
 		device: DeviceInfo,
 		session: Option<Session>,
@@ -322,8 +322,8 @@ impl GrindrClient {
 
 	/// Watches the current [`Session`].
 	///
-	/// It changes on login, refresh, and logout — read it here to save the
-	/// session to disk.
+	/// It changes on login, refresh, and logout — read it here to persist its
+	/// [`credentials`](crate::Session::credentials) to disk.
 	pub fn session_receiver(&self) -> watch::Receiver<Option<Session>> {
 		self.session_rx.clone()
 	}
@@ -706,6 +706,7 @@ impl GrindrClient {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::auth::{Credentials, SessionToken};
 
 	#[test]
 	fn new_does_not_require_a_runtime() {
@@ -730,17 +731,27 @@ mod tests {
 
 	#[tokio::test]
 	async fn a_session_without_a_token_is_never_sent_as_an_empty_bearer() {
-		// Far-future expiry stands in for a refresh that already ran.
-		let mut session = Session::from_auth_token("a@b.c", "auth-tok");
-		session.expires_at = u64::MAX;
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		crate::testserver::queue_session_replies(
+			&device_id,
+			[("503 Service Unavailable", "{}".to_owned())],
+		);
 		let client =
-			GrindrClient::new(DeviceInfo::generate(), Some(session)).unwrap();
+			GrindrClient::new(device, Some(resumed("a@b.c", "auth-tok")))
+				.unwrap();
 
 		let err = client
 			.request_authenticated_raw(Method::GET, "/v3/me/profile", None)
 			.await
 			.unwrap_err();
 		assert!(matches!(err, GrindrError::Auth(_)), "got {err:?}");
+
+		let requests = crate::testserver::requests_from(&device_id);
+		assert!(
+			requests.iter().all(|r| r.path != "/v3/me/profile"),
+			"the authenticated call must never leave without a token"
+		);
 	}
 
 	#[tokio::test]
@@ -786,11 +797,9 @@ mod tests {
 	async fn a_token_resumed_session_refreshes_before_its_first_request() {
 		let device = DeviceInfo::generate();
 		let device_id = device.device_id.clone();
-		let client = GrindrClient::new(
-			device,
-			Some(Session::from_auth_token("a@b.c", "stored-tok")),
-		)
-		.unwrap();
+		let client =
+			GrindrClient::new(device, Some(resumed("a@b.c", "stored-tok")))
+				.unwrap();
 
 		let resp = client
 			.request_authenticated_raw(Method::GET, "/v3/bootstrap", None)
@@ -807,10 +816,10 @@ mod tests {
 
 		let refreshed = client.session_receiver().borrow().clone().unwrap();
 		assert_eq!(
-			refreshed.profile_id,
-			crate::testserver::REFRESHED_PROFILE_ID
+			refreshed.credentials.profile_id.as_deref(),
+			Some(crate::testserver::REFRESHED_PROFILE_ID)
 		);
-		let bearer = format!("Grindr3 {}", refreshed.session_id);
+		let bearer = format!("Grindr3 {}", refreshed.token.unwrap().session_id);
 		assert_eq!(requests[1].header("authorization"), Some(bearer.as_str()));
 	}
 
@@ -923,11 +932,9 @@ mod tests {
 	async fn an_unsigned_chat_upload_registers_no_key_and_signs_nothing() {
 		let device = DeviceInfo::generate();
 		let device_id = device.device_id.clone();
-		let client = GrindrClient::new(
-			device,
-			Some(Session::from_auth_token("a@b.c", "stored-tok")),
-		)
-		.unwrap();
+		let client =
+			GrindrClient::new(device, Some(resumed("a@b.c", "stored-tok")))
+				.unwrap();
 
 		let uploaded = client
 			.upload_chat_media_unsigned(vec![0xFF, 0xD8], "image/jpeg")
@@ -964,11 +971,9 @@ mod tests {
 
 		let device = DeviceInfo::generate();
 		let device_id = device.device_id.clone();
-		let client = GrindrClient::new(
-			device,
-			Some(Session::from_auth_token("a@b.c", "stored-tok")),
-		)
-		.unwrap();
+		let client =
+			GrindrClient::new(device, Some(resumed("a@b.c", "stored-tok")))
+				.unwrap();
 
 		client
 			.upload_profile_image(vec![0xFF, 0xD8], None, false)
@@ -1071,24 +1076,44 @@ mod tests {
 		drop(clone);
 	}
 
+	fn resumed(email: &str, auth_token: &str) -> Session {
+		Session {
+			credentials: Credentials {
+				email: email.to_owned(),
+				profile_id: None,
+				auth_token: auth_token.to_owned(),
+				kind: crate::auth::SessionKind::Email,
+				third_party_user_id: None,
+			},
+			token: None,
+		}
+	}
+
 	fn expired_session() -> Session {
 		Session {
-			expires_at: 0,
-			session_id: "stale-sid".to_owned(),
+			token: Some(SessionToken {
+				session_id: "stale-sid".to_owned(),
+				expires_at: 0,
+				restriction: None,
+			}),
 			..fake_session()
 		}
 	}
 
 	fn fake_session() -> Session {
 		Session {
-			email: "user@example.com".to_owned(),
-			expires_at: u64::MAX,
-			profile_id: "1".to_owned(),
-			session_id: "sid".to_owned(),
-			auth_token: "atok".to_owned(),
-			kind: crate::auth::SessionKind::Email,
-			third_party_user_id: None,
-			restriction: None,
+			credentials: Credentials {
+				email: "user@example.com".to_owned(),
+				profile_id: Some("1".to_owned()),
+				auth_token: "atok".to_owned(),
+				kind: crate::auth::SessionKind::Email,
+				third_party_user_id: None,
+			},
+			token: Some(SessionToken {
+				session_id: "sid".to_owned(),
+				expires_at: u64::MAX,
+				restriction: None,
+			}),
 		}
 	}
 

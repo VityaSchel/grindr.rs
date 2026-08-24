@@ -20,65 +20,67 @@ pub enum SessionKind {
 	Google,
 }
 
-/// An authenticated session.
-///
-/// A `Session` has credentials (`session_id` and `auth_token`) and
-/// is `Serialize`/`Deserialize` so it can be persisted between runs and handed
-/// back to [`GrindrClient::new`](crate::GrindrClient::new). It's a secret:
-/// store it somewhere only the user can read and delete after sign out.
-/// Its [`fmt::Debug`] implementation redacts the credential fields so they are
-/// not leaked through logs.
-#[derive(Serialize, Deserialize, Clone)]
-#[non_exhaustive]
+/// An authenticated session: the account's [`Credentials`] plus the
+/// short-lived [`SessionToken`] once one has been minted.
+#[derive(Debug, Clone)]
 pub struct Session {
-	/// Account email (or third-party display id for non-email logins).
-	pub email: String,
-	/// Unix timestamp (seconds) at which `session_id` expires.
-	pub expires_at: u64,
-	/// The account's profile id.
-	pub profile_id: String,
+	/// The durable half; persist this.
+	pub credentials: Credentials,
+	/// The short-lived half; `None` until a session is minted.
+	pub token: Option<SessionToken>,
+}
+
+/// The short-lived half of a [`Session`], minted by the server.
+/// [`fmt::Debug`] redacts `session_id`.
+#[derive(Clone)]
+pub struct SessionToken {
 	/// Short-lived bearer token (a JWT) sent in the `Authorization` header.
 	pub session_id: String,
+	/// Unix timestamp (seconds) at which `session_id` expires.
+	pub expires_at: u64,
+	/// Account restriction carried in the JWT, if any. The token is valid.
+	pub restriction: Option<Restriction>,
+}
+
+impl fmt::Debug for SessionToken {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("SessionToken")
+			.field("session_id", &"<redacted>")
+			.field("expires_at", &self.expires_at)
+			.field("restriction", &self.restriction)
+			.finish()
+	}
+}
+
+/// The durable half of a [`Session`], enough to resume the account on a later
+/// run. It is a secret: store it where only the user can read it and delete it
+/// on sign out. [`fmt::Debug`] redacts `auth_token`.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct Credentials {
+	/// Account email (or third-party display id for non-email logins).
+	pub email: String,
+	/// The account's profile id, known once a session has been minted.
+	#[serde(default)]
+	pub profile_id: Option<String>,
 	/// Long-lived token used to mint a fresh `session_id` on refresh.
 	pub auth_token: String,
-	/// How this session was created.
+	/// How the session was created.
 	#[serde(default)]
 	pub kind: SessionKind,
 	/// Vendor-scoped user id for third-party logins, if any.
 	#[serde(default)]
 	pub third_party_user_id: Option<String>,
-	/// Account restriction from the session JWT, if any. The session is valid.
-	#[serde(default)]
-	pub restriction: Option<Restriction>,
 }
 
-impl Session {
-	/// Builds a session from a stored long-lived `auth_token`, for resuming an
-	/// account without its short-lived `session_id`.
-	///
-	/// The session starts expired, so the first authenticated call refreshes it
-	/// and fills in `profile_id` and the rest. Pass the result to
-	/// [`GrindrClient::new`](crate::GrindrClient::new), then read the refreshed
-	/// session back from
-	/// [`session_receiver`](crate::GrindrClient::session_receiver).
-	///
-	/// Only for email accounts — third-party sessions must come from
-	/// [`google_sign_in`](crate::GrindrClient::google_sign_in), which supplies
-	/// the vendor-scoped id that their refresh endpoint requires.
-	pub fn from_auth_token(
-		email: impl Into<String>,
-		auth_token: impl Into<String>,
-	) -> Self {
-		Session {
-			email: email.into(),
-			expires_at: 0,
-			profile_id: String::new(),
-			session_id: String::new(),
-			auth_token: auth_token.into(),
-			kind: SessionKind::Email,
-			third_party_user_id: None,
-			restriction: None,
-		}
+impl fmt::Debug for Credentials {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("Credentials")
+			.field("email", &self.email)
+			.field("profile_id", &self.profile_id)
+			.field("auth_token", &"<redacted>")
+			.field("kind", &self.kind)
+			.field("third_party_user_id", &self.third_party_user_id)
+			.finish()
 	}
 }
 
@@ -129,23 +131,6 @@ pub struct BanDetails {
 	/// Whether the ban was automated.
 	#[serde(default)]
 	pub is_automated: bool,
-}
-
-impl fmt::Debug for Session {
-	/// Redacts `session_id` and `auth_token` so the bearer credentials never
-	/// show up in logs via `{:?}`.
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("Session")
-			.field("email", &self.email)
-			.field("expires_at", &self.expires_at)
-			.field("profile_id", &self.profile_id)
-			.field("session_id", &"<redacted>")
-			.field("auth_token", &"<redacted>")
-			.field("kind", &self.kind)
-			.field("third_party_user_id", &self.third_party_user_id)
-			.field("restriction", &self.restriction)
-			.finish()
-	}
 }
 
 /// The outcome of a successful login or token refresh.
@@ -473,7 +458,7 @@ pub(crate) async fn create_session(
 	kind: SessionKind,
 	third_party_user_id: Option<String>,
 	required_device_info: Option<crate::rest::RequiredDeviceInfo>,
-) -> Result<Session, GrindrError> {
+) -> Result<(Session, LoginResult), GrindrError> {
 	let resp: SessionResponse = inner
 		.request_no_auth(
 			wreq::Method::POST,
@@ -484,17 +469,27 @@ pub(crate) async fn create_session(
 		.await?;
 
 	let claims = decode_session_jwt(&resp.session_id)?;
+	let restriction = restriction_from_claims(&claims);
 
-	Ok(Session {
-		email: body.email().to_owned(),
-		profile_id: resp.profile_id,
-		session_id: resp.session_id,
-		auth_token: resp.auth_token,
-		expires_at: claims.exp,
-		kind,
-		third_party_user_id,
-		restriction: restriction_from_claims(&claims),
-	})
+	let result = LoginResult {
+		profile_id: resp.profile_id.clone(),
+		restriction: restriction.clone(),
+	};
+	let session = Session {
+		credentials: Credentials {
+			email: body.email().to_owned(),
+			profile_id: Some(resp.profile_id),
+			auth_token: resp.auth_token,
+			kind,
+			third_party_user_id,
+		},
+		token: Some(SessionToken {
+			session_id: resp.session_id,
+			expires_at: claims.exp,
+			restriction,
+		}),
+	};
+	Ok((session, result))
 }
 
 pub(crate) async fn login_email(
@@ -511,7 +506,7 @@ pub(crate) async fn login_email(
 		geohash: geohash.map(str::to_owned),
 	};
 	let epoch = auth.epoch();
-	let session = create_session(
+	let (session, result) = create_session(
 		inner,
 		&body,
 		SessionKind::Email,
@@ -519,15 +514,10 @@ pub(crate) async fn login_email(
 		Some(crate::rest::RequiredDeviceInfo::Real),
 	)
 	.await?;
-	let profile_id = session.profile_id.clone();
-	let restriction = session.restriction.clone();
 	if !auth.set_session_if_current(session, epoch).await {
 		return Err(GrindrError::SessionCleared);
 	}
-	Ok(LoginResult {
-		profile_id,
-		restriction,
-	})
+	Ok(result)
 }
 
 pub(crate) async fn google_sign_in(
@@ -554,33 +544,39 @@ pub(crate) async fn google_sign_in(
 		GrindrError::Auth("account not registered".to_owned())
 	})?;
 	let fallback_email = tp.third_party_user_id.clone();
-	let session = session_from_third_party(tp, fallback_email)?;
-	let profile_id = session.profile_id.clone();
-	let restriction = session.restriction.clone();
+	let (session, result) = session_from_third_party(tp, fallback_email)?;
 	if !auth.set_session_if_current(session, epoch).await {
 		return Err(GrindrError::SessionCleared);
 	}
-	Ok(LoginResult {
-		profile_id,
-		restriction,
-	})
+	Ok(result)
 }
 
 fn session_from_third_party(
 	tp: ThirdPartySession,
 	fallback_email: String,
-) -> Result<Session, GrindrError> {
+) -> Result<(Session, LoginResult), GrindrError> {
 	let claims = decode_session_jwt(&tp.session_id)?;
-	Ok(Session {
-		email: tp.third_party_user_id_to_show.unwrap_or(fallback_email),
-		profile_id: tp.profile_id,
-		session_id: tp.session_id,
-		auth_token: tp.auth_token,
-		expires_at: claims.exp,
-		kind: SessionKind::Google,
-		third_party_user_id: Some(tp.third_party_user_id),
-		restriction: restriction_from_claims(&claims),
-	})
+	let restriction = restriction_from_claims(&claims);
+
+	let result = LoginResult {
+		profile_id: tp.profile_id.clone(),
+		restriction: restriction.clone(),
+	};
+	let session = Session {
+		credentials: Credentials {
+			email: tp.third_party_user_id_to_show.unwrap_or(fallback_email),
+			profile_id: Some(tp.profile_id),
+			auth_token: tp.auth_token,
+			kind: SessionKind::Google,
+			third_party_user_id: Some(tp.third_party_user_id),
+		},
+		token: Some(SessionToken {
+			session_id: tp.session_id,
+			expires_at: claims.exp,
+			restriction,
+		}),
+	};
+	Ok((session, result))
 }
 
 async fn refresh_third_party_session(
@@ -589,7 +585,7 @@ async fn refresh_third_party_session(
 	auth_token: &str,
 	fallback_email: String,
 	geohash: Option<&str>,
-) -> Result<Session, GrindrError> {
+) -> Result<(Session, LoginResult), GrindrError> {
 	let body = ThirdPartyRefreshRequest {
 		third_party_user_id,
 		auth_token,
@@ -620,15 +616,15 @@ pub(crate) async fn refresh_token(
 			.as_ref()
 			.ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))?;
 		(
-			s.kind.clone(),
-			s.email.clone(),
-			s.auth_token.clone(),
-			s.third_party_user_id.clone(),
+			s.credentials.kind.clone(),
+			s.credentials.email.clone(),
+			s.credentials.auth_token.clone(),
+			s.credentials.third_party_user_id.clone(),
 			auth.epoch(),
 		)
 	};
 
-	let session = match kind {
+	let (session, result) = match kind {
 		SessionKind::Email => {
 			let body = RefreshRequest {
 				email,
@@ -655,15 +651,10 @@ pub(crate) async fn refresh_token(
 		}
 	};
 
-	let profile_id = session.profile_id.clone();
-	let restriction = session.restriction.clone();
 	if !auth.set_session_if_current(session, epoch).await {
 		return Err(GrindrError::SessionCleared);
 	}
-	Ok(LoginResult {
-		profile_id,
-		restriction,
-	})
+	Ok(result)
 }
 
 async fn emit_refresh_failure(auth: &AuthState, error: GrindrError) {
@@ -719,8 +710,10 @@ pub(crate) async fn refresh_after_unauthorized(
 
 	match auth.session.read().await.as_ref() {
 		None => return false,
-		Some(s) if s.session_id != rejected_session_id => return true,
-		Some(_) => {}
+		Some(s) => match &s.token {
+			Some(t) if t.session_id == rejected_session_id => {}
+			_ => return true,
+		},
 	}
 
 	refresh_gated(inner, auth, "reactive").await
@@ -743,23 +736,33 @@ pub(crate) async fn recaptcha_first_party_enabled(
 		.any(|a| a.key == "recaptcha_first_party" && a.value == "on"))
 }
 
+fn expires_before(session: &Session, deadline: u64) -> bool {
+	session
+		.token
+		.as_ref()
+		.is_none_or(|token| token.expires_at < deadline)
+}
+
 pub(crate) async fn authorization_header(
 	inner: &InnerClient,
 	auth: &AuthState,
 ) -> Option<String> {
-	let expires_at = auth.session.read().await.as_ref()?.expires_at;
-
 	const REFRESH_BUFFER_SECS: u64 = 60;
 
-	if expires_at < now_unix() + REFRESH_BUFFER_SECS {
+	let expiring = expires_before(
+		auth.session.read().await.as_ref()?,
+		now_unix() + REFRESH_BUFFER_SECS,
+	);
+
+	if expiring {
 		let _guard = auth.refresh_lock.lock().await;
 
-		let still_expired = match auth.session.read().await.as_ref() {
-			Some(s) => s.expires_at < now_unix() + REFRESH_BUFFER_SECS,
+		let still_expiring = match auth.session.read().await.as_ref() {
+			Some(s) => expires_before(s, now_unix() + REFRESH_BUFFER_SECS),
 			None => return None,
 		};
 
-		if still_expired {
+		if still_expiring {
 			refresh_gated(inner, auth, "proactive").await;
 		}
 	}
@@ -768,26 +771,13 @@ pub(crate) async fn authorization_header(
 		.read()
 		.await
 		.as_ref()
-		.filter(|s| !s.session_id.is_empty())
-		.map(|s| format!("Grindr3 {}", s.session_id))
+		.and_then(|s| s.token.as_ref())
+		.map(|token| format!("Grindr3 {}", token.session_id))
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	#[test]
-	fn from_auth_token_starts_expired_so_the_first_call_refreshes() {
-		let session = Session::from_auth_token("a@b.c", "long-lived");
-
-		assert_eq!(session.email, "a@b.c");
-		assert_eq!(session.auth_token, "long-lived");
-		assert_eq!(session.expires_at, 0);
-		assert!(session.session_id.is_empty());
-		assert!(session.profile_id.is_empty());
-		assert_eq!(session.kind, SessionKind::Email);
-		assert!(session.third_party_user_id.is_none());
-	}
 
 	// Header {"alg":"HS256","typ":"JWT"} . payload {"exp":9999999999} . sig
 	const JWT: &str =
@@ -795,14 +785,18 @@ mod tests {
 
 	fn session_named(email: &str) -> Session {
 		Session {
-			email: email.to_owned(),
-			expires_at: 9_999_999_999,
-			profile_id: "42".to_owned(),
-			session_id: JWT.to_owned(),
-			auth_token: "auth-tok".to_owned(),
-			kind: SessionKind::Email,
-			third_party_user_id: None,
-			restriction: None,
+			credentials: Credentials {
+				email: email.to_owned(),
+				profile_id: Some("42".to_owned()),
+				auth_token: "auth-tok".to_owned(),
+				kind: SessionKind::Email,
+				third_party_user_id: None,
+			},
+			token: Some(SessionToken {
+				session_id: JWT.to_owned(),
+				expires_at: 9_999_999_999,
+				restriction: None,
+			}),
 		}
 	}
 
@@ -835,7 +829,16 @@ mod tests {
 				.await,
 			"signing in again after a sign-out must work"
 		);
-		assert_eq!(auth.session.read().await.as_ref().unwrap().email, "new@x");
+		assert_eq!(
+			auth.session
+				.read()
+				.await
+				.as_ref()
+				.unwrap()
+				.credentials
+				.email,
+			"new@x"
+		);
 	}
 
 	fn third_party_session(show: Option<&str>) -> ThirdPartySession {
@@ -905,26 +908,30 @@ mod tests {
 
 	#[test]
 	fn session_from_third_party_preserves_google_identity() {
-		let session = session_from_third_party(
+		let (session, _) = session_from_third_party(
 			third_party_session(Some("me@example.com")),
 			"fallback@example.com".to_owned(),
 		)
 		.unwrap();
 
-		assert_eq!(session.kind, SessionKind::Google);
-		assert_eq!(session.third_party_user_id.as_deref(), Some("vendor-uid"));
-		assert_eq!(session.auth_token, "auth-tok");
-		assert_eq!(session.email, "me@example.com");
+		let credentials = session.credentials;
+		assert_eq!(credentials.kind, SessionKind::Google);
+		assert_eq!(
+			credentials.third_party_user_id.as_deref(),
+			Some("vendor-uid")
+		);
+		assert_eq!(credentials.auth_token, "auth-tok");
+		assert_eq!(credentials.email, "me@example.com");
 	}
 
 	#[test]
 	fn session_from_third_party_falls_back_when_no_display_id() {
-		let session = session_from_third_party(
+		let (session, _) = session_from_third_party(
 			third_party_session(None),
 			"fallback@example.com".to_owned(),
 		)
 		.unwrap();
-		assert_eq!(session.email, "fallback@example.com");
+		assert_eq!(session.credentials.email, "fallback@example.com");
 	}
 
 	#[test]

@@ -63,17 +63,18 @@ async fn main() -> Result<(), grindr::GrindrError> {
 ## Sessions & device identity
 
 ```rust
-// Load `device` and `saved` from disk
-let client = GrindrClient::new(device, saved)?;
+// Load `device` and `credentials` from disk
+let resumed = credentials.map(|credentials| Session { credentials, token: None });
+let client = GrindrClient::new(device, resumed)?;
 
-// Persist session whenever it changes
+// Persist the durable half whenever it changes
 let mut sessions = client.session_receiver();
 tokio::spawn(async move {
     while sessions.changed().await.is_ok() {
-        // Option<Session>
-        let current = sessions.borrow().clone();
+        // Option<Credentials>
+        let current = sessions.borrow().as_ref().map(|s| s.credentials.clone());
         // Serialize to disk and store securely
-        save_session(&current);
+        save_credentials(&current);
     }
 });
 ```
@@ -197,7 +198,8 @@ Everything under **Identity and session** and **Requests and errors** — except
 **Identity and session**
 
 - `DeviceInfo` — device identity, build with `DeviceInfo::generate()` or `DeviceInfo::default()`
-- `Session` — session token and other secrets. `Debug` redacts the credentials. `Session::from_auth_token(email, auth_token)` resumes an email account from a stored long-lived token
+- `Credentials` — the durable half of a session; the serializable part, persist this. `Debug` redacts `auth_token`. Resume with `Session { credentials, token: None }`
+- `Session` — the account's `Credentials` plus the short-lived `SessionToken` once one is minted. `Debug` redacts `session_id`
 - `SessionKind` — `Email` or `Google`
 - `LoginResult` — `{ profile_id, restriction }`, returned by the auth methods
 - `Restriction` — account restriction from the session JWT, the session is still valid: `AgeVerification { region, reason }` / `TimedBan(BanDetails)` / `TrustVendorRejected` / `Other(String)`

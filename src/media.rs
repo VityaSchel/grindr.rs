@@ -151,7 +151,7 @@ impl InnerClient {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::auth::{Session, SessionKind};
+	use crate::auth::{Credentials, Session, SessionKind, SessionToken};
 	use crate::device::DeviceInfo;
 	use crate::testserver::{self, MEDIA_PREFIX};
 	use crate::GrindrClient;
@@ -162,14 +162,18 @@ mod tests {
 
 	fn signed_in_client() -> GrindrClient {
 		let session = Session {
-			email: "user@example.com".to_owned(),
-			expires_at: u64::MAX,
-			profile_id: "1".to_owned(),
-			session_id: "sid".to_owned(),
-			auth_token: "atok".to_owned(),
-			kind: SessionKind::Email,
-			third_party_user_id: None,
-			restriction: None,
+			credentials: Credentials {
+				email: "user@example.com".to_owned(),
+				profile_id: Some("1".to_owned()),
+				auth_token: "atok".to_owned(),
+				kind: SessionKind::Email,
+				third_party_user_id: None,
+			},
+			token: Some(SessionToken {
+				session_id: "sid".to_owned(),
+				expires_at: u64::MAX,
+				restriction: None,
+			}),
 		};
 		GrindrClient::new(DeviceInfo::generate(), Some(session)).unwrap()
 	}

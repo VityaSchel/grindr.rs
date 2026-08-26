@@ -31,6 +31,10 @@ pub enum GrindrError {
 	#[error("HTTP error: {0}")]
 	Http(String),
 
+	/// The connection to the server could not be established (DNS, TCP or TLS).
+	#[error("could not connect: {0}")]
+	Connect(String),
+
 	/// Authentication problem that is not a server `401` (e.g. not logged in,
 	/// JWT could not be decoded, or a third-party account is not registered).
 	#[error("auth error: {0}")]
@@ -159,6 +163,25 @@ impl GrindrError {
 
 impl From<wreq::Error> for GrindrError {
 	fn from(e: wreq::Error) -> Self {
-		GrindrError::Http(e.to_string())
+		if e.is_connect() {
+			GrindrError::Connect(e.to_string())
+		} else {
+			GrindrError::Http(e.to_string())
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn a_refused_connection_is_a_connect_error() {
+		let error = wreq::Client::new()
+			.get("http://127.0.0.1:1/")
+			.send()
+			.await
+			.unwrap_err();
+		assert!(matches!(GrindrError::from(error), GrindrError::Connect(_)));
 	}
 }

@@ -128,6 +128,15 @@ impl InnerClient {
 		let content_range = header(&response, "content-range");
 		let accept_ranges = header(&response, "accept-ranges");
 
+		if response
+			.content_length()
+			.is_some_and(|len| len > request.max_bytes as u64)
+		{
+			return Err(GrindrError::MediaTooLarge {
+				max_bytes: request.max_bytes,
+			});
+		}
+
 		let mut body = BytesMut::new();
 		while let Some(chunk) = response.chunk().await? {
 			if body.len() + chunk.len() > request.max_bytes {
@@ -402,6 +411,21 @@ mod tests {
 			matches!(err, GrindrError::MediaTooLarge { max_bytes: 512 }),
 			"got {err:?}"
 		);
+	}
+
+	#[tokio::test]
+	async fn a_body_exactly_at_the_ceiling_is_still_delivered() {
+		let url = media_url(512);
+
+		let response = signed_in_client()
+			.fetch_media(MediaRequest {
+				max_bytes: 512,
+				..request(&url)
+			})
+			.await
+			.expect("a body at the ceiling fits");
+
+		assert_eq!(response.body.len(), 512);
 	}
 
 	#[tokio::test]

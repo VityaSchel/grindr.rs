@@ -113,6 +113,8 @@ fn apply_required_device_info(
 
 pub(crate) struct InnerClient {
 	pub fingerprint: tokio::sync::RwLock<Arc<Fingerprint>>,
+	pub captcha:
+		std::sync::OnceLock<Arc<dyn crate::captcha::CaptchaTokenProvider>>,
 	pub signing: tokio::sync::Mutex<Option<DeviceKey>>,
 	pub signing_key_tx: watch::Sender<Option<DeviceSigningKey>>,
 	pub server_offset_ms: AtomicI64,
@@ -312,6 +314,10 @@ impl InnerClient {
 		method: Method,
 		path: &str,
 		body: Option<RequestBody>,
+		extra_headers: &[(
+			wreq::header::HeaderName,
+			wreq::header::HeaderValue,
+		)],
 	) -> Result<RawResponse, GrindrError> {
 		validate_path(path)?;
 
@@ -329,12 +335,13 @@ impl InnerClient {
 				.map(|token| token.session_id.clone());
 
 			let fp = self.fingerprint().await;
-			let headers = GrindrHeaders::build(
+			let mut headers = GrindrHeaders::build(
 				&fp.device,
 				&fp.user_agent,
 				Some(&authorization),
 				Some("[FREE]"),
 			)?;
+			headers.items.extend_from_slice(extra_headers);
 
 			let req = Self::apply_headers_then_body(
 				fp.http
@@ -379,6 +386,7 @@ impl InnerClient {
 				method,
 				path,
 				body.map(RequestBody::Json),
+				&[],
 			)
 			.await?;
 		if !(200..300).contains(&resp.status) {
@@ -436,14 +444,42 @@ impl InnerClient {
 		})
 		.map_err(|e| GrindrError::Http(e.to_string()))?;
 
-		let resp = self
-			.request_authenticated(
-				auth,
-				Method::POST,
-				"/v1/verification/device-keys",
-				Some(RequestBody::Json(body)),
-			)
-			.await?;
+		let captcha =
+			match self.captcha.get() {
+				Some(provider) => provider
+					.token(crate::captcha::CaptchaAction::DeviceKeyRegistration)
+					.await,
+				None => None,
+			};
+		let resp = match captcha {
+			Some(token) => {
+				let header = (
+					wreq::header::HeaderName::from_static(
+						"x-grindr-captcha-token",
+					),
+					wreq::header::HeaderValue::from_str(&token)
+						.map_err(|e| GrindrError::Http(e.to_string()))?,
+				);
+				self.request_authenticated(
+					auth,
+					Method::POST,
+					"/v2/verification/device-keys",
+					Some(RequestBody::Json(body)),
+					&[header],
+				)
+				.await?
+			}
+			None => {
+				self.request_authenticated(
+					auth,
+					Method::POST,
+					"/v1/verification/device-keys",
+					Some(RequestBody::Json(body)),
+					&[],
+				)
+				.await?
+			}
+		};
 		if !(200..300).contains(&resp.status) {
 			return Err(parse_api_error(&resp.body, resp.status));
 		}

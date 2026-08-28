@@ -719,8 +719,9 @@ pub(crate) async fn refresh_after_unauthorized(
 	refresh_gated(inner, auth, "reactive").await
 }
 
-pub(crate) async fn recaptcha_first_party_enabled(
+async fn assignment_enabled(
 	inner: &InnerClient,
+	key: &str,
 ) -> Result<bool, GrindrError> {
 	let resp: AssignmentsResponse = inner
 		.request_no_auth::<(), _>(
@@ -733,7 +734,19 @@ pub(crate) async fn recaptcha_first_party_enabled(
 	Ok(resp
 		.assignments
 		.iter()
-		.any(|a| a.key == "recaptcha_first_party" && a.value == "on"))
+		.any(|a| a.key == key && a.value == "on"))
+}
+
+pub(crate) async fn recaptcha_first_party_enabled(
+	inner: &InnerClient,
+) -> Result<bool, GrindrError> {
+	assignment_enabled(inner, "recaptcha_first_party").await
+}
+
+pub(crate) async fn recaptcha_device_key_registration_enabled(
+	inner: &InnerClient,
+) -> Result<bool, GrindrError> {
+	assignment_enabled(inner, "recaptcha_device_key_registration").await
 }
 
 fn expires_before(session: &Session, deadline: u64) -> bool {

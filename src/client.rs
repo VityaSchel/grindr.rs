@@ -261,6 +261,7 @@ impl GrindrClient {
 		let (signing_key_tx, signing_key_rx) = watch::channel(None);
 		let inner = Arc::new(InnerClient {
 			fingerprint: tokio::sync::RwLock::new(fingerprint),
+			captcha: std::sync::OnceLock::new(),
 			signing: tokio::sync::Mutex::new(None),
 			signing_key_tx,
 			server_offset_ms: std::sync::atomic::AtomicI64::new(0),
@@ -513,6 +514,7 @@ impl GrindrClient {
 				method,
 				path,
 				body.map(RequestBody::Json),
+				&[],
 			)
 			.await
 	}
@@ -561,6 +563,7 @@ impl GrindrClient {
 					content_type: content_type.to_owned(),
 					bytes: body.into(),
 				}),
+				&[],
 			)
 			.await
 	}
@@ -696,6 +699,30 @@ impl GrindrClient {
 	}
 
 	/// Whether the server has first-party reCAPTCHA enabled. No auth needed.
+	/// Registers a [`CaptchaTokenProvider`](crate::CaptchaTokenProvider) the
+	/// client uses to obtain the `X-Grindr-Captcha-Token` for captcha
+	/// requests (currently device-key registration). Without one, the client uses
+	/// the no-captcha endpoints. Set once; later calls are ignored.
+	pub fn set_captcha_provider(
+		&self,
+		provider: std::sync::Arc<dyn crate::captcha::CaptchaTokenProvider>,
+	) {
+		let _ = self.inner.captcha.set(provider);
+	}
+
+	/// Reports whether the server's assignments require device key registration
+	/// with a captcha (`recaptcha_device_key_registration`), so a provider can
+	/// decide whether a token is needed.
+	pub async fn recaptcha_device_key_registration_enabled(
+		&self,
+	) -> Result<bool, GrindrError> {
+		crate::auth::recaptcha_device_key_registration_enabled(&self.inner)
+			.await
+	}
+
+	/// Reports whether the server's assignments enable first-party reCAPTCHA
+	/// (`recaptcha_first_party`), which selects the `v9` over the `v8` login
+	/// session endpoint.
 	pub async fn recaptcha_first_party_enabled(
 		&self,
 	) -> Result<bool, GrindrError> {
@@ -1074,6 +1101,63 @@ mod tests {
 		let clone = client.clone();
 		drop(client);
 		drop(clone);
+	}
+
+	#[tokio::test]
+	async fn a_captcha_provider_registers_the_key_over_v2_with_the_token() {
+		struct FixedCaptcha;
+		impl crate::captcha::CaptchaTokenProvider for FixedCaptcha {
+			fn token(
+				&self,
+				action: crate::captcha::CaptchaAction,
+			) -> std::pin::Pin<
+				Box<
+					dyn std::future::Future<Output = Option<String>>
+						+ Send
+						+ '_,
+				>,
+			> {
+				assert_eq!(
+					action,
+					crate::captcha::CaptchaAction::DeviceKeyRegistration
+				);
+				Box::pin(async { Some("captcha-xyz".to_owned()) })
+			}
+		}
+
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		let client =
+			GrindrClient::new(device, Some(resumed("a@b.c", "stored-tok")))
+				.unwrap();
+		client.set_captcha_provider(std::sync::Arc::new(FixedCaptcha));
+
+		client
+			.upload_profile_image(vec![0xFF, 0xD8], None, false)
+			.await
+			.unwrap();
+
+		let requests = crate::testserver::requests_from(&device_id);
+		let paths: Vec<&str> =
+			requests.iter().map(|r| r.path.as_str()).collect();
+		assert_eq!(
+			paths,
+			[
+				"/v8/sessions",
+				"/v1/verification/device-keys/challenge",
+				"/v2/verification/device-keys",
+				"/v5/media/upload?takenOnGrindr=false",
+			]
+		);
+
+		let registration = requests
+			.iter()
+			.find(|r| r.path == "/v2/verification/device-keys")
+			.unwrap();
+		assert_eq!(
+			registration.header("x-grindr-captcha-token"),
+			Some("captcha-xyz")
+		);
 	}
 
 	fn resumed(email: &str, auth_token: &str) -> Session {

@@ -47,6 +47,7 @@
 #![warn(missing_docs)]
 
 mod auth;
+mod captcha;
 mod client;
 mod device;
 mod error;
@@ -62,6 +63,7 @@ pub use auth::{
 	AuthEvent, BanDetails, Credentials, LoginResult, RefreshFailureKind,
 	Restriction, Session, SessionKind, SessionToken, VerificationRegion,
 };
+pub use captcha::{CaptchaAction, CaptchaTokenProvider};
 pub use client::{probe_emulation, GrindrClient};
 pub use device::DeviceInfo;
 pub use error::{BanInfo, BanKind, BlockKind, GrindrError};

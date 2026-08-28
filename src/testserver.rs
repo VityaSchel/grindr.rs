@@ -255,6 +255,7 @@ fn respond(path: &str, headers: &[(String, String)]) -> (&'static str, String) {
 			("200 OK", format!(r#"{{"challenge":"{CHALLENGE}"}}"#))
 		}
 		"/v1/verification/device-keys" => ("200 OK", "{}".to_owned()),
+		"/v2/verification/device-keys" => ("200 OK", "{}".to_owned()),
 		"/v5/media/upload" => (
 			"200 OK",
 			r#"{"hash":"media-hash","imageSizes":[]}"#.to_owned(),

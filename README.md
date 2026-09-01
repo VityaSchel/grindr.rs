@@ -23,14 +23,14 @@ This crate is a transport: it handles authentication, fingerprinting, connection
 
 ```toml
 [dependencies]
-grindr = "0.10"
+grindr = "0.18"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 serde_json = "1"
 ```
 
 ### Versioning
 
-This crate's version is `<lib version>+<Grindr APK version>`. For example, `0.1.0+26.9.1.163471` is library `0.1.0` targeting APK `26.9.1.163471`. The `+<apk>` suffix is [SemVer build metadata](https://semver.org/#spec-item-10): informational only, and ignored by Cargo when resolving versions. Retargeting the APK is treated as a breaking change, so it bumps the minor, requiring manual upgrade. The targeted version is also exposed as `grindr::APP_VERSION`.
+This crate's version is `<lib version>+<Grindr APK version>`. For example, `0.18.0+26.15.1.174557` is library `0.18.0` targeting APK `26.15.1.174557`. The `+<apk>` suffix is [SemVer build metadata](https://semver.org/#spec-item-10): informational only, and ignored by Cargo when resolving versions. Retargeting the APK is treated as a breaking change, so it bumps the minor, requiring manual upgrade. The targeted version is also exposed as `grindr::APP_VERSION`.
 
 ## Quick start
 

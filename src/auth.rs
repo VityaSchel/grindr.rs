@@ -18,6 +18,21 @@ pub enum SessionKind {
 	Email,
 	/// Google third-party sign-in.
 	Google,
+	/// Facebook third-party sign-in.
+	Facebook,
+}
+
+impl SessionKind {
+	/// `thirdPartyVendor` for the third-party kinds; `None` for [`Email`].
+	///
+	/// [`Email`]: SessionKind::Email
+	fn third_party_vendor(&self) -> Option<u8> {
+		match self {
+			SessionKind::Email => None,
+			SessionKind::Facebook => Some(1),
+			SessionKind::Google => Some(2),
+		}
+	}
 }
 
 /// An authenticated session: the account's [`Credentials`] plus the
@@ -520,16 +535,22 @@ pub(crate) async fn login_email(
 	Ok(result)
 }
 
-pub(crate) async fn google_sign_in(
+pub(crate) async fn third_party_sign_in(
 	inner: &InnerClient,
 	auth: &AuthState,
-	google_access_token: &str,
+	kind: SessionKind,
+	provider_access_token: &str,
 	geohash: Option<&str>,
 ) -> Result<LoginResult, GrindrError> {
+	let Some(third_party_vendor) = kind.third_party_vendor() else {
+		return Err(GrindrError::Auth(
+			"not a third-party session kind".to_owned(),
+		));
+	};
 	let epoch = auth.epoch();
 	let body = ThirdPartySignInRequest {
-		third_party_vendor: 2,
-		third_party_token: google_access_token,
+		third_party_vendor,
+		third_party_token: provider_access_token,
 		geohash,
 	};
 	let parsed: ThirdPartyAuthResponse = inner
@@ -544,7 +565,7 @@ pub(crate) async fn google_sign_in(
 		GrindrError::Auth("account not registered".to_owned())
 	})?;
 	let fallback_email = tp.third_party_user_id.clone();
-	let (session, result) = session_from_third_party(tp, fallback_email)?;
+	let (session, result) = session_from_third_party(tp, fallback_email, kind)?;
 	if !auth.set_session_if_current(session, epoch).await {
 		return Err(GrindrError::SessionCleared);
 	}
@@ -554,6 +575,7 @@ pub(crate) async fn google_sign_in(
 fn session_from_third_party(
 	tp: ThirdPartySession,
 	fallback_email: String,
+	kind: SessionKind,
 ) -> Result<(Session, LoginResult), GrindrError> {
 	let claims = decode_session_jwt(&tp.session_id)?;
 	let restriction = restriction_from_claims(&claims);
@@ -567,7 +589,7 @@ fn session_from_third_party(
 			email: tp.third_party_user_id_to_show.unwrap_or(fallback_email),
 			profile_id: Some(tp.profile_id),
 			auth_token: tp.auth_token,
-			kind: SessionKind::Google,
+			kind,
 			third_party_user_id: Some(tp.third_party_user_id),
 		},
 		token: Some(SessionToken {
@@ -585,6 +607,7 @@ async fn refresh_third_party_session(
 	auth_token: &str,
 	fallback_email: String,
 	geohash: Option<&str>,
+	kind: SessionKind,
 ) -> Result<(Session, LoginResult), GrindrError> {
 	let body = ThirdPartyRefreshRequest {
 		third_party_user_id,
@@ -602,7 +625,7 @@ async fn refresh_third_party_session(
 	let tp = parsed.authentication_response.ok_or_else(|| {
 		GrindrError::Auth("third-party session refresh rejected".to_owned())
 	})?;
-	session_from_third_party(tp, fallback_email)
+	session_from_third_party(tp, fallback_email, kind)
 }
 
 pub(crate) async fn refresh_token(
@@ -634,10 +657,11 @@ pub(crate) async fn refresh_token(
 			};
 			create_session(inner, &body, SessionKind::Email, None, None).await?
 		}
-		SessionKind::Google => {
+		kind @ (SessionKind::Google | SessionKind::Facebook) => {
 			let third_party_user_id = third_party_user_id.ok_or_else(|| {
 				GrindrError::Auth(
-					"google session missing third-party user id".to_owned(),
+					"third-party session missing third-party user id"
+						.to_owned(),
 				)
 			})?;
 			refresh_third_party_session(
@@ -646,6 +670,7 @@ pub(crate) async fn refresh_token(
 				&auth_token,
 				email,
 				geohash,
+				kind,
 			)
 			.await?
 		}
@@ -924,6 +949,7 @@ mod tests {
 		let (session, _) = session_from_third_party(
 			third_party_session(Some("me@example.com")),
 			"fallback@example.com".to_owned(),
+			SessionKind::Google,
 		)
 		.unwrap();
 
@@ -942,9 +968,28 @@ mod tests {
 		let (session, _) = session_from_third_party(
 			third_party_session(None),
 			"fallback@example.com".to_owned(),
+			SessionKind::Google,
 		)
 		.unwrap();
 		assert_eq!(session.credentials.email, "fallback@example.com");
+	}
+
+	#[test]
+	fn session_from_third_party_tags_the_facebook_kind() {
+		let (session, _) = session_from_third_party(
+			third_party_session(Some("me@example.com")),
+			"fallback@example.com".to_owned(),
+			SessionKind::Facebook,
+		)
+		.unwrap();
+		assert_eq!(session.credentials.kind, SessionKind::Facebook);
+	}
+
+	#[test]
+	fn vendor_ids_match_the_documented_third_party_vendors() {
+		assert_eq!(SessionKind::Facebook.third_party_vendor(), Some(1));
+		assert_eq!(SessionKind::Google.third_party_vendor(), Some(2));
+		assert_eq!(SessionKind::Email.third_party_vendor(), None);
 	}
 
 	#[test]

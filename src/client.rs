@@ -8,7 +8,7 @@ use wreq::{
 	Method, PseudoOrder, SettingsOrder, SslCurve, TlsConfig, TlsVersion,
 };
 
-use crate::auth::{AuthEvent, AuthState, LoginResult, Session};
+use crate::auth::{AuthEvent, AuthState, LoginResult, Session, SessionKind};
 use crate::device::DeviceInfo;
 use crate::error::GrindrError;
 use crate::headers::build_user_agent;
@@ -453,10 +453,55 @@ impl GrindrClient {
 		google_access_token: &str,
 		geohash: Option<&str>,
 	) -> Result<LoginResult, GrindrError> {
-		crate::auth::google_sign_in(
+		self.third_party_sign_in_with_geohash(
+			SessionKind::Google,
+			google_access_token,
+			geohash,
+		)
+		.await
+	}
+
+	/// Signs in with a Facebook user access token and stores the session.
+	pub async fn facebook_sign_in(
+		&self,
+		facebook_access_token: &str,
+	) -> Result<LoginResult, GrindrError> {
+		self.third_party_sign_in_with_geohash(
+			SessionKind::Facebook,
+			facebook_access_token,
+			None,
+		)
+		.await
+	}
+
+	/// Like [`facebook_sign_in`](Self::facebook_sign_in), but tags the sign-in
+	/// request with a `geohash`.
+	pub async fn facebook_sign_in_with_geohash(
+		&self,
+		facebook_access_token: &str,
+		geohash: Option<&str>,
+	) -> Result<LoginResult, GrindrError> {
+		self.third_party_sign_in_with_geohash(
+			SessionKind::Facebook,
+			facebook_access_token,
+			geohash,
+		)
+		.await
+	}
+
+	/// Signs in with any third-party provider token. `kind` selects the
+	/// `thirdPartyVendor`; [`SessionKind::Email`] is rejected.
+	pub async fn third_party_sign_in_with_geohash(
+		&self,
+		kind: SessionKind,
+		provider_access_token: &str,
+		geohash: Option<&str>,
+	) -> Result<LoginResult, GrindrError> {
+		crate::auth::third_party_sign_in(
 			&self.inner,
 			&self.auth,
-			google_access_token,
+			kind,
+			provider_access_token,
 			geohash,
 		)
 		.await

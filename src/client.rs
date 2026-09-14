@@ -613,6 +613,11 @@ impl GrindrClient {
 			.await
 	}
 
+	/// Registers the device signing key unless one exists.
+	pub async fn register_device_key(&self) -> Result<(), GrindrError> {
+		self.inner.ensure_device_key(&self.auth).await
+	}
+
 	/// Sends a device-key-signed request with a raw binary body, for the upload
 	/// endpoints that require it (`/v5/media/upload`, `/v6/chat/media/upload`).
 	///
@@ -1104,6 +1109,32 @@ mod tests {
 				.is_err(),
 			"the key must not bind to the blank pre-refresh profile id"
 		);
+	}
+
+	#[tokio::test]
+	async fn registering_twice_without_a_provider_posts_v1_once() {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		let client =
+			GrindrClient::new(device, Some(resumed("a@b.c", "stored-tok")))
+				.unwrap();
+
+		client.register_device_key().await.unwrap();
+		client.register_device_key().await.unwrap();
+
+		let requests = crate::testserver::requests_from(&device_id);
+		let paths: Vec<&str> =
+			requests.iter().map(|r| r.path.as_str()).collect();
+		assert_eq!(
+			paths,
+			[
+				"/v8/sessions",
+				"/v1/verification/device-keys/challenge",
+				"/v1/verification/device-keys",
+			],
+			"a registered key must not be registered again"
+		);
+		assert!(client.signing_key_receiver().borrow().is_some());
 	}
 
 	#[tokio::test]

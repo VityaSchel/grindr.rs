@@ -413,7 +413,7 @@ impl InnerClient {
 		}
 	}
 
-	async fn ensure_device_key(
+	pub(crate) async fn ensure_device_key(
 		&self,
 		auth: &AuthState,
 	) -> Result<(), GrindrError> {

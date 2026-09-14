@@ -170,6 +170,7 @@ Signed uploads register an ephemeral P-256 device key on first use. Persist it t
 | `upload_profile_image(jpeg, thumb_coords, taken_on_grindr) -> Result<UploadProfileImageResponse>`         | Signed `POST /v5/media/upload`                                                       |
 | `upload_chat_media(bytes, content_type, length, looping, taken_on_grindr) -> Result<MediaUploadResponse>` | Signed `POST /v6/chat/media/upload`                                                  |
 | `upload_chat_media_unsigned(bytes, content_type) -> Result<MediaUploadResponse>`                          | Unsigned `POST /v5/chat/media/upload`, for media the user did not capture in the app |
+| `register_device_key() -> Result<()>`                                                                     | Register the device signing key unless one exists                                    |
 | `restore_signing_key(key) -> bool`                                                                        | Restore a persisted `DeviceSigningKey`; refused if it belongs to another account     |
 | `signing_key_receiver() -> watch::Receiver<Option<DeviceSigningKey>>`                                     | Watch the signing key so you can save it                                             |
 
@@ -270,6 +271,14 @@ cargo run --example fingerprint_check
 ```
 
 The `fingerprint_check` example verifies JA3/JA4, the Akamai http/2 fingerprint and header ordering against [tls.peet.ws](https://tls.peet.ws). Pass `--all` flag to check both http/2 and http/1.1 (websocket) clients.
+
+Register a device key against the live API, with the device persisted across runs:
+
+```sh
+EMAIL=... PASSWORD=... cargo run --example device_key_baseline
+```
+
+`CAPTCHA_TOKEN`, a reCAPTCHA Enterprise token, is optional; `DEVICE_FILE` defaults to `target/device_key_baseline.json`.
 
 ## Minimum supported Rust version
 

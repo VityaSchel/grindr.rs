@@ -8,6 +8,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 /// Header `{"alg":"HS256","typ":"JWT"}` . payload `{"exp":9999999999}` . sig
 const JWT: &str =
@@ -112,10 +113,9 @@ fn serve(mut stream: TcpStream) {
 		.find(|(n, _)| n == "content-length")
 		.and_then(|(_, v)| v.parse().ok())
 		.unwrap_or(0);
-	let mut body = vec![0u8; length];
-	if length > 0 && reader.read_exact(&mut body).is_err() {
+	let Some(body) = read_body(&mut reader, &path, length) else {
 		return;
-	}
+	};
 
 	let reply = match path.strip_prefix(MEDIA_PREFIX) {
 		Some(rest) => media_reply(rest, &headers),
@@ -150,6 +150,33 @@ fn serve(mut stream: TcpStream) {
 	let _ = stream.write_all(head.as_bytes());
 	let _ = stream.write_all(&reply.body);
 	let _ = stream.flush();
+}
+
+pub(crate) const SLOW_READ_PREFIX: &str = "/slow-read/";
+
+const SLOW_READ_CHUNKS: u32 = 8;
+
+fn read_body(
+	reader: &mut impl Read,
+	path: &str,
+	length: usize,
+) -> Option<Vec<u8>> {
+	let mut body = vec![0u8; length];
+	let pause = path
+		.strip_prefix(SLOW_READ_PREFIX)
+		.and_then(|millis| millis.parse::<u64>().ok())
+		.map(|millis| Duration::from_millis(millis) / SLOW_READ_CHUNKS);
+	match pause {
+		None => reader.read_exact(&mut body).ok()?,
+		Some(pause) => {
+			let chunk_len = length.div_ceil(SLOW_READ_CHUNKS as usize).max(1);
+			for chunk in body.chunks_mut(chunk_len) {
+				std::thread::sleep(pause);
+				reader.read_exact(chunk).ok()?;
+			}
+		}
+	}
+	Some(body)
 }
 
 struct Reply {
@@ -243,6 +270,7 @@ fn queued_session_reply(
 
 fn respond(path: &str, headers: &[(String, String)]) -> (&'static str, String) {
 	match path.split('?').next().unwrap_or(path) {
+		slow if slow.starts_with(SLOW_READ_PREFIX) => ("200 OK", "{}".to_owned()),
 		"/v8/sessions" => queued_session_reply(headers).unwrap_or_else(|| {
 			(
 				"200 OK",

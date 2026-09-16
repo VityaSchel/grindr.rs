@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use serde::{de::DeserializeOwned, Serialize};
@@ -9,7 +9,7 @@ use wreq::header::HeaderMap;
 use wreq::{Client, Method, RequestBuilder};
 
 use crate::auth::AuthState;
-use crate::client::{CALL_TIMEOUT, UPLOAD_TIMEOUT};
+use crate::client::{Timeouts, CALL_TIMEOUT};
 use crate::device::DeviceInfo;
 use crate::error::{BanInfo, BanKind, BlockKind, GrindrError};
 use crate::headers::GrindrHeaders;
@@ -118,6 +118,7 @@ pub(crate) struct InnerClient {
 	pub signing: tokio::sync::Mutex<Option<DeviceKey>>,
 	pub signing_key_tx: watch::Sender<Option<DeviceSigningKey>>,
 	pub server_offset_ms: AtomicI64,
+	pub timeouts: Timeouts,
 }
 
 fn local_now_ms() -> i64 {
@@ -233,11 +234,20 @@ impl InnerClient {
 		req
 	}
 
-	fn call_timeout(body: Option<&RequestBody>) -> Duration {
+	pub(crate) fn apply_call_timeouts(
+		&self,
+		req: RequestBuilder,
+		body: Option<&RequestBody>,
+	) -> RequestBuilder {
 		match body {
-			Some(RequestBody::Raw { .. }) => UPLOAD_TIMEOUT,
-			_ => CALL_TIMEOUT,
+			Some(RequestBody::Raw { .. }) => self.apply_upload_timeouts(req),
+			_ => req.timeout(CALL_TIMEOUT),
 		}
+	}
+
+	fn apply_upload_timeouts(&self, req: RequestBuilder) -> RequestBuilder {
+		req.timeout(self.timeouts.upload)
+			.read_timeout(self.timeouts.upload)
 	}
 
 	pub async fn request_no_auth<TReq, TResp>(
@@ -298,8 +308,8 @@ impl InnerClient {
 			fp.http.request(method, format!("{}{path}", base_url())),
 			&headers.items,
 			body.as_ref(),
-		)
-		.timeout(Self::call_timeout(body.as_ref()));
+		);
+		let req = self.apply_call_timeouts(req, body.as_ref());
 
 		let resp = req.send().await?;
 		self.note_server_date(resp.headers());
@@ -348,8 +358,8 @@ impl InnerClient {
 					.request(method.clone(), format!("{}{path}", base_url())),
 				&headers.items,
 				body.as_ref(),
-			)
-			.timeout(Self::call_timeout(body.as_ref()));
+			);
+			let req = self.apply_call_timeouts(req, body.as_ref());
 
 			let resp = req.send().await?;
 			self.note_server_date(resp.headers());
@@ -540,14 +550,15 @@ impl InnerClient {
 				fp.http
 					.request(method.clone(), format!("{}{path}", base_url())),
 				&headers.items,
-			)
-			.timeout(UPLOAD_TIMEOUT)
-			.header("x-key-id", &signature.key_id)
-			.header("x-sig", &signature.signature)
-			.header("x-timestamp", signature.timestamp.to_string())
-			.header("x-nonce", &signature.nonce)
-			.header("content-type", content_type)
-			.body(body.clone());
+			);
+			let req = self
+				.apply_upload_timeouts(req)
+				.header("x-key-id", &signature.key_id)
+				.header("x-sig", &signature.signature)
+				.header("x-timestamp", signature.timestamp.to_string())
+				.header("x-nonce", &signature.nonce)
+				.header("content-type", content_type)
+				.body(body.clone());
 
 			let resp = req.send().await?;
 			self.note_server_date(resp.headers());
@@ -824,20 +835,6 @@ mod tests {
 		let key = DeviceKey::generate("42".to_owned()).export();
 
 		assert!(client.restore_signing_key(key).await);
-	}
-
-	#[test]
-	fn only_byte_bodies_get_the_upload_timeout() {
-		let raw = RequestBody::Raw {
-			content_type: "image/jpeg".to_owned(),
-			bytes: Bytes::from_static(b"jpeg"),
-		};
-		let json = RequestBody::Json(serde_json::json!({}));
-
-		assert_eq!(InnerClient::call_timeout(Some(&raw)), UPLOAD_TIMEOUT);
-		assert_eq!(InnerClient::call_timeout(Some(&json)), CALL_TIMEOUT);
-		assert_eq!(InnerClient::call_timeout(None), CALL_TIMEOUT);
-		assert!(UPLOAD_TIMEOUT > CALL_TIMEOUT);
 	}
 
 	#[test]

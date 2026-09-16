@@ -150,9 +150,28 @@ pub fn probe_emulation() -> EmulationProvider {
 
 /// okhttp's defaults
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(35);
-pub(crate) const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[derive(Clone, Copy)]
+pub(crate) struct Timeouts {
+	pub read: Duration,
+	pub upload: Duration,
+}
+
+impl Default for Timeouts {
+	fn default() -> Self {
+		Self {
+			read: Duration::from_secs(30),
+			upload: Duration::from_secs(120),
+		}
+	}
+}
+
+pub(crate) struct ClientSetup {
+	pub device: DeviceInfo,
+	pub session: Option<Session>,
+	pub timeouts: Timeouts,
+}
 
 /// Shared `wreq` setup: the emulation profile plus gzip-only encoding.
 fn grindr_client_builder() -> wreq::ClientBuilder {
@@ -168,9 +187,9 @@ fn grindr_client_builder() -> wreq::ClientBuilder {
 		.tcp_keepalive(None)
 }
 
-fn build_http_client() -> Result<Client, GrindrError> {
+fn build_http_client(read_timeout: Duration) -> Result<Client, GrindrError> {
 	grindr_client_builder()
-		.read_timeout(READ_TIMEOUT)
+		.read_timeout(read_timeout)
 		.build()
 		.map_err(Into::into)
 }
@@ -187,9 +206,10 @@ fn build_ws_client() -> Result<Client, GrindrError> {
 /// Builds the transport shared by [`GrindrClient::new`] and [`GrindrClient::rotate_device`].
 fn build_fingerprint(
 	device: DeviceInfo,
+	timeouts: Timeouts,
 ) -> Result<Arc<Fingerprint>, GrindrError> {
 	let user_agent = build_user_agent(&device, "Free");
-	let http = build_http_client()?;
+	let http = build_http_client(timeouts.read)?;
 	let ws_http = build_ws_client()?;
 	Ok(Arc::new(Fingerprint {
 		http,
@@ -256,7 +276,15 @@ impl GrindrClient {
 		device: DeviceInfo,
 		session: Option<Session>,
 	) -> Result<Self, GrindrError> {
-		let fingerprint = build_fingerprint(device)?;
+		Self::from_setup(ClientSetup {
+			device,
+			session,
+			timeouts: Timeouts::default(),
+		})
+	}
+
+	pub(crate) fn from_setup(setup: ClientSetup) -> Result<Self, GrindrError> {
+		let fingerprint = build_fingerprint(setup.device, setup.timeouts)?;
 
 		let (signing_key_tx, signing_key_rx) = watch::channel(None);
 		let inner = Arc::new(InnerClient {
@@ -265,9 +293,10 @@ impl GrindrClient {
 			signing: tokio::sync::Mutex::new(None),
 			signing_key_tx,
 			server_offset_ms: std::sync::atomic::AtomicI64::new(0),
+			timeouts: setup.timeouts,
 		});
 
-		let (auth_state, session_rx) = AuthState::new(session);
+		let (auth_state, session_rx) = AuthState::new(setup.session);
 		let auth = Arc::new(auth_state);
 
 		let (ws_channels, ws_handles) = make_channels();
@@ -378,7 +407,7 @@ impl GrindrClient {
 	/// having noticed, stalling the first request that inherits one.
 	pub async fn reset_transport(&self) -> Result<(), GrindrError> {
 		let device = self.inner.fingerprint().await.device.clone();
-		let fingerprint = build_fingerprint(device)?;
+		let fingerprint = build_fingerprint(device, self.inner.timeouts)?;
 		*self.inner.fingerprint.write().await = fingerprint;
 		Ok(())
 	}
@@ -721,7 +750,7 @@ impl GrindrClient {
 		&self,
 		device: DeviceInfo,
 	) -> Result<DeviceInfo, GrindrError> {
-		let new_fp = build_fingerprint(device)?;
+		let new_fp = build_fingerprint(device, self.inner.timeouts)?;
 		let old_fp = {
 			let mut guard = self.inner.fingerprint.write().await;
 			std::mem::replace(&mut *guard, new_fp)
@@ -791,6 +820,78 @@ mod tests {
 		// of any Tokio runtime.
 		let client = GrindrClient::new(DeviceInfo::generate(), None).unwrap();
 		assert!(!client.ws_started.is_completed());
+	}
+
+	#[test]
+	fn only_byte_bodies_get_the_upload_timeouts() {
+		let upload = Duration::from_secs(7);
+		let client = GrindrClient::from_setup(ClientSetup {
+			device: DeviceInfo::generate(),
+			session: None,
+			timeouts: Timeouts {
+				upload,
+				..Timeouts::default()
+			},
+		})
+		.unwrap();
+		let raw = RequestBody::Raw {
+			content_type: "image/jpeg".to_owned(),
+			bytes: Bytes::from_static(b"jpeg"),
+		};
+		let json = RequestBody::Json(serde_json::json!({}));
+		let timeouts_for = |body: Option<&RequestBody>| {
+			let request = client
+				.inner
+				.apply_call_timeouts(
+					Client::new().post("http://localhost/"),
+					body,
+				)
+				.build()
+				.unwrap();
+			(request.timeout().copied(), request.read_timeout().copied())
+		};
+
+		assert_eq!(timeouts_for(Some(&raw)), (Some(upload), Some(upload)));
+		assert_eq!(timeouts_for(Some(&json)), (Some(CALL_TIMEOUT), None));
+		assert_eq!(timeouts_for(None), (Some(CALL_TIMEOUT), None));
+		assert!(Timeouts::default().upload > CALL_TIMEOUT);
+	}
+
+	#[tokio::test]
+	async fn a_bytes_upload_slower_than_the_read_timeout_succeeds() {
+		let client = GrindrClient::from_setup(ClientSetup {
+			device: DeviceInfo::generate(),
+			session: Some(fake_session()),
+			timeouts: Timeouts {
+				read: Duration::from_millis(200),
+				..Timeouts::default()
+			},
+		})
+		.unwrap();
+		let slow_upload = format!("{}600", crate::testserver::SLOW_READ_PREFIX);
+		let bytes = vec![0u8; 64 * 1024];
+
+		let unsigned = client
+			.request_authenticated_bytes(
+				Method::POST,
+				&slow_upload,
+				"application/octet-stream",
+				bytes.clone(),
+			)
+			.await
+			.unwrap();
+		let signed = client
+			.request_signed_bytes(
+				Method::POST,
+				&slow_upload,
+				"application/octet-stream",
+				bytes,
+			)
+			.await
+			.unwrap();
+
+		assert_eq!(unsigned.status, 200);
+		assert_eq!(signed.status, 200);
 	}
 
 	#[tokio::test]

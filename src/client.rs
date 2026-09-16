@@ -894,6 +894,93 @@ mod tests {
 		assert_eq!(signed.status, 200);
 	}
 
+	fn late_unauthorized(millis: u64) -> String {
+		format!("{}{millis}", crate::testserver::LATE_UNAUTHORIZED_PREFIX)
+	}
+
+	fn attempts_at(device_id: &str, path: &str) -> usize {
+		crate::testserver::requests_from(device_id)
+			.iter()
+			.filter(|r| r.path == path)
+			.count()
+	}
+
+	#[tokio::test]
+	async fn a_401_is_retried_once_under_the_same_account() {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		let fake = fake_session();
+		let session = Session {
+			credentials: Credentials {
+				profile_id: Some(
+					crate::testserver::REFRESHED_PROFILE_ID.to_owned(),
+				),
+				..fake.credentials
+			},
+			..fake
+		};
+		let client = GrindrClient::new(device, Some(session)).unwrap();
+		let path = late_unauthorized(0);
+
+		let resp = client
+			.request_authenticated_raw(Method::GET, &path, None)
+			.await
+			.unwrap();
+
+		assert_eq!(resp.status, 401);
+		assert_eq!(attempts_at(&device_id, &path), 2);
+	}
+
+	#[tokio::test]
+	async fn a_401_is_not_retried_after_another_account_signs_in() {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		let client = GrindrClient::new(device, Some(fake_session())).unwrap();
+		let path = late_unauthorized(300);
+
+		let (result, signed_in) = tokio::join!(
+			client.request_authenticated_raw(Method::GET, &path, None),
+			client.login("b@example.com", "pw"),
+		);
+
+		assert_eq!(
+			signed_in.unwrap().profile_id,
+			crate::testserver::REFRESHED_PROFILE_ID
+		);
+		assert!(
+			matches!(result, Err(GrindrError::SessionCleared)),
+			"got {result:?}"
+		);
+		assert_eq!(attempts_at(&device_id, &path), 1);
+	}
+
+	#[tokio::test]
+	async fn a_signed_401_is_not_retried_after_another_account_signs_in() {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		let client = GrindrClient::new(device, Some(fake_session())).unwrap();
+		let own_key = crate::signing::DeviceKey::generate("1".to_owned());
+		assert!(client.restore_signing_key(own_key.export()).await);
+		let path = late_unauthorized(300);
+
+		let (result, signed_in) = tokio::join!(
+			client.request_signed_bytes(
+				Method::POST,
+				&path,
+				"image/jpeg",
+				vec![0xFF, 0xD8],
+			),
+			client.login("b@example.com", "pw"),
+		);
+
+		signed_in.unwrap();
+		assert!(
+			matches!(result, Err(GrindrError::SessionCleared)),
+			"got {result:?}"
+		);
+		assert_eq!(attempts_at(&device_id, &path), 1);
+	}
+
 	#[tokio::test]
 	async fn rest_calls_do_not_start_the_ws_task() {
 		let client = GrindrClient::new(DeviceInfo::generate(), None).unwrap();

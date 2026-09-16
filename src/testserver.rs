@@ -268,8 +268,20 @@ fn queued_session_reply(
 	queued.get_mut(&key)?.pop_front()
 }
 
+pub(crate) const LATE_UNAUTHORIZED_PREFIX: &str = "/late-401/";
+
 fn respond(path: &str, headers: &[(String, String)]) -> (&'static str, String) {
 	match path.split('?').next().unwrap_or(path) {
+		late if late.starts_with(LATE_UNAUTHORIZED_PREFIX) => {
+			let millis = late[LATE_UNAUTHORIZED_PREFIX.len()..]
+				.parse()
+				.unwrap_or_default();
+			std::thread::sleep(Duration::from_millis(millis));
+			(
+				"401 Unauthorized",
+				r#"{"code":401,"message":"unauthorized"}"#.to_owned(),
+			)
+		}
 		slow if slow.starts_with(SLOW_READ_PREFIX) => ("200 OK", "{}".to_owned()),
 		"/v8/sessions" => queued_session_reply(headers).unwrap_or_else(|| {
 			(

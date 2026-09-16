@@ -182,9 +182,7 @@ async fn connect_and_run(
 	active_rx: &mut watch::Receiver<bool>,
 	offer_deflate: &mut bool,
 ) -> Result<(), GrindrError> {
-	let authorization = crate::auth::authorization_header(inner, auth)
-		.await
-		.ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))?;
+	let authorization = crate::auth::authorize(inner, auth).await?.header();
 
 	let fp = inner.fingerprint().await;
 	let headers = GrindrHeaders::build(

@@ -331,24 +331,14 @@ impl InnerClient {
 	) -> Result<RawResponse, GrindrError> {
 		validate_path(path)?;
 
+		let mut authorization = crate::auth::authorize(self, auth).await?;
 		let mut retried = false;
 		loop {
-			let authorization = crate::auth::authorization_header(self, auth)
-				.await
-				.ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))?;
-			let session_id = auth
-				.session
-				.read()
-				.await
-				.as_ref()
-				.and_then(|s| s.token.as_ref())
-				.map(|token| token.session_id.clone());
-
 			let fp = self.fingerprint().await;
 			let mut headers = GrindrHeaders::build(
 				&fp.device,
 				&fp.user_agent,
-				Some(&authorization),
+				Some(&authorization.header()),
 				Some("[FREE]"),
 			)?;
 			headers.items.extend_from_slice(extra_headers);
@@ -368,14 +358,20 @@ impl InnerClient {
 
 			if status == 401 && !retried {
 				retried = true;
-				if let Some(stale) = session_id {
-					if crate::auth::refresh_after_unauthorized(
-						self, auth, &stale,
+				if crate::auth::refresh_after_unauthorized(
+					self,
+					auth,
+					&authorization.session_id,
+				)
+				.await
+				{
+					authorization = crate::auth::reauthorize_same_profile(
+						self,
+						auth,
+						&authorization,
 					)
-					.await
-					{
-						continue;
-					}
+					.await?;
+					continue;
 				}
 			}
 
@@ -412,9 +408,7 @@ impl InnerClient {
 		&self,
 		auth: &AuthState,
 	) -> Result<String, GrindrError> {
-		crate::auth::authorization_header(self, auth)
-			.await
-			.ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))?;
+		crate::auth::authorize(self, auth).await?;
 		match session_user_id(auth).await? {
 			Some(id) => Ok(id),
 			None => Err(GrindrError::Auth(
@@ -511,20 +505,10 @@ impl InnerClient {
 		validate_path(path)?;
 		self.ensure_device_key(auth).await?;
 
+		let mut authorization = crate::auth::authorize(self, auth).await?;
 		let mut refreshed = false;
 		let mut resigned = false;
 		loop {
-			let authorization = crate::auth::authorization_header(self, auth)
-				.await
-				.ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))?;
-			let session_id = auth
-				.session
-				.read()
-				.await
-				.as_ref()
-				.and_then(|s| s.token.as_ref())
-				.map(|token| token.session_id.clone());
-
 			let fp = self.fingerprint().await;
 			let android_id = fp.device.device_id.clone();
 			let timestamp = self.synced_now_ms();
@@ -543,7 +527,7 @@ impl InnerClient {
 			let headers = GrindrHeaders::build(
 				&fp.device,
 				&fp.user_agent,
-				Some(&authorization),
+				Some(&authorization.header()),
 				Some("[FREE]"),
 			)?;
 			let req = Self::apply_headers(
@@ -567,14 +551,20 @@ impl InnerClient {
 
 			if status == 401 && !refreshed {
 				refreshed = true;
-				if let Some(stale) = session_id {
-					if crate::auth::refresh_after_unauthorized(
-						self, auth, &stale,
+				if crate::auth::refresh_after_unauthorized(
+					self,
+					auth,
+					&authorization.session_id,
+				)
+				.await
+				{
+					authorization = crate::auth::reauthorize_same_profile(
+						self,
+						auth,
+						&authorization,
 					)
-					.await
-					{
-						continue;
-					}
+					.await?;
+					continue;
 				}
 			}
 
@@ -582,6 +572,12 @@ impl InnerClient {
 				match signing_reject(&body_bytes) {
 					Some(SigningReject::Retryable) if !resigned => {
 						resigned = true;
+						authorization = crate::auth::reauthorize_same_profile(
+							self,
+							auth,
+							&authorization,
+						)
+						.await?;
 						continue;
 					}
 					Some(SigningReject::Fatal) => self.clear_signing().await,

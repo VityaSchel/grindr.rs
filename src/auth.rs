@@ -744,6 +744,18 @@ pub(crate) async fn refresh_after_unauthorized(
 	refresh_gated(inner, auth, "reactive").await
 }
 
+pub(crate) async fn reauthorize_same_profile(
+	inner: &InnerClient,
+	auth: &AuthState,
+	previous: &Authorization,
+) -> Result<Authorization, GrindrError> {
+	let renewed = authorize(inner, auth).await?;
+	if renewed.profile_id != previous.profile_id {
+		return Err(GrindrError::SessionCleared);
+	}
+	Ok(renewed)
+}
+
 async fn assignment_enabled(
 	inner: &InnerClient,
 	key: &str,
@@ -781,14 +793,31 @@ fn expires_before(session: &Session, deadline: u64) -> bool {
 		.is_none_or(|token| token.expires_at < deadline)
 }
 
-pub(crate) async fn authorization_header(
+pub(crate) struct Authorization {
+	pub session_id: String,
+	pub profile_id: Option<String>,
+}
+
+impl Authorization {
+	pub fn header(&self) -> String {
+		format!("Grindr3 {}", self.session_id)
+	}
+}
+
+pub(crate) async fn authorize(
 	inner: &InnerClient,
 	auth: &AuthState,
-) -> Option<String> {
+) -> Result<Authorization, GrindrError> {
 	const REFRESH_BUFFER_SECS: u64 = 60;
 
+	let not_logged_in = || GrindrError::Auth("not logged in".to_owned());
+
 	let expiring = expires_before(
-		auth.session.read().await.as_ref()?,
+		auth.session
+			.read()
+			.await
+			.as_ref()
+			.ok_or_else(not_logged_in)?,
 		now_unix() + REFRESH_BUFFER_SECS,
 	);
 
@@ -797,7 +826,7 @@ pub(crate) async fn authorization_header(
 
 		let still_expiring = match auth.session.read().await.as_ref() {
 			Some(s) => expires_before(s, now_unix() + REFRESH_BUFFER_SECS),
-			None => return None,
+			None => return Err(not_logged_in()),
 		};
 
 		if still_expiring {
@@ -805,12 +834,13 @@ pub(crate) async fn authorization_header(
 		}
 	}
 
-	auth.session
-		.read()
-		.await
-		.as_ref()
-		.and_then(|s| s.token.as_ref())
-		.map(|token| format!("Grindr3 {}", token.session_id))
+	let session = auth.session.read().await;
+	let session = session.as_ref().ok_or_else(not_logged_in)?;
+	let token = session.token.as_ref().ok_or_else(not_logged_in)?;
+	Ok(Authorization {
+		session_id: token.session_id.clone(),
+		profile_id: session.credentials.profile_id.clone(),
+	})
 }
 
 #[cfg(test)]

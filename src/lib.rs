@@ -57,6 +57,8 @@ mod rest;
 mod signing;
 #[cfg(test)]
 mod testserver;
+#[cfg(test)]
+mod wire_tests;
 mod ws;
 
 pub use auth::{

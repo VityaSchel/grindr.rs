@@ -1369,32 +1369,14 @@ mod tests {
 
 	#[tokio::test]
 	async fn a_captcha_provider_registers_the_key_over_v2_with_the_token() {
-		struct FixedCaptcha;
-		impl crate::captcha::CaptchaTokenProvider for FixedCaptcha {
-			fn token(
-				&self,
-				action: crate::captcha::CaptchaAction,
-			) -> std::pin::Pin<
-				Box<
-					dyn std::future::Future<Output = Option<String>>
-						+ Send
-						+ '_,
-				>,
-			> {
-				assert_eq!(
-					action,
-					crate::captcha::CaptchaAction::DeviceKeyRegistration
-				);
-				Box::pin(async { Some("captcha-xyz".to_owned()) })
-			}
-		}
-
 		let device = DeviceInfo::generate();
 		let device_id = device.device_id.clone();
 		let client =
 			GrindrClient::new(device, Some(resumed("a@b.c", "stored-tok")))
 				.unwrap();
-		client.set_captcha_provider(std::sync::Arc::new(FixedCaptcha));
+		client.set_captcha_provider(std::sync::Arc::new(
+			crate::testserver::FixedCaptcha,
+		));
 
 		client
 			.upload_profile_image(vec![0xFF, 0xD8], None, false)

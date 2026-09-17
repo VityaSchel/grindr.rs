@@ -5,16 +5,32 @@
 //! [`requests_from`] on their own generated device id.
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::pin::Pin;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+use crate::captcha::{CaptchaAction, CaptchaTokenProvider};
 
 /// Header `{"alg":"HS256","typ":"JWT"}` . payload `{"exp":9999999999}` . sig
 const JWT: &str =
 	"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjk5OTk5OTk5OTl9.sig";
 
 pub(crate) const REFRESHED_PROFILE_ID: &str = "42";
+
+pub(crate) struct FixedCaptcha;
+
+impl CaptchaTokenProvider for FixedCaptcha {
+	fn token(
+		&self,
+		action: CaptchaAction,
+	) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+		assert_eq!(action, CaptchaAction::DeviceKeyRegistration);
+		Box::pin(async { Some("captcha-xyz".to_owned()) })
+	}
+}
 
 pub(crate) const CHALLENGE: &str = "chal-123";
 
@@ -270,6 +286,8 @@ fn queued_session_reply(
 
 pub(crate) const LATE_UNAUTHORIZED_PREFIX: &str = "/late-401/";
 
+pub(crate) const ACCEPTING_PATH: &str = "/accepting";
+
 fn respond(path: &str, headers: &[(String, String)]) -> (&'static str, String) {
 	match path.split('?').next().unwrap_or(path) {
 		late if late.starts_with(LATE_UNAUTHORIZED_PREFIX) => {
@@ -283,6 +301,7 @@ fn respond(path: &str, headers: &[(String, String)]) -> (&'static str, String) {
 			)
 		}
 		slow if slow.starts_with(SLOW_READ_PREFIX) => ("200 OK", "{}".to_owned()),
+		ACCEPTING_PATH => ("200 OK", "{}".to_owned()),
 		"/v8/sessions" => queued_session_reply(headers).unwrap_or_else(|| {
 			(
 				"200 OK",

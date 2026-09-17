@@ -16,6 +16,7 @@ use crate::rest::{
 	RequiredDeviceInfo, ACCEPT_ENCODING, JSON_CONTENT_TYPE,
 };
 use crate::signing::{signing_reject, SigningReject};
+use crate::stream::{BodySource, StreamedRequest};
 
 /// A request to the API, sent with the session unless
 /// [`unauthenticated`](Self::unauthenticated).
@@ -40,6 +41,10 @@ pub(crate) enum Body {
 		content_type: HeaderValue,
 		bytes: Bytes,
 	},
+	Stream {
+		content_type: HeaderValue,
+		source: Arc<dyn BodySource>,
+	},
 }
 
 pub(crate) struct Request<'a> {
@@ -56,9 +61,9 @@ pub(crate) enum Access<'a> {
 	Session(&'a AuthState),
 }
 
-struct Answer {
-	status: u16,
-	body: Bytes,
+pub(crate) struct Answer {
+	pub status: u16,
+	pub body: Bytes,
 }
 
 impl RequestBuilder {
@@ -104,6 +109,20 @@ impl RequestBuilder {
 			parse_content_type(content_type).map(|content_type| Body::Signed {
 				content_type,
 				bytes: body.into(),
+			});
+		self
+	}
+
+	/// Sends `source` while reading it; a stall timeout replaces the total one.
+	pub fn stream(
+		mut self,
+		content_type: &str,
+		source: impl BodySource + 'static,
+	) -> Self {
+		self.body =
+			parse_content_type(content_type).map(|content_type| Body::Stream {
+				content_type,
+				source: Arc::new(source),
 			});
 		self
 	}
@@ -278,6 +297,19 @@ impl InnerClient {
 		);
 
 		let builder = match &request.body {
+			Body::Stream {
+				content_type,
+				source,
+			} => {
+				return self
+					.send_streamed(StreamedRequest {
+						request: builder,
+						headers: &headers.items,
+						content_type,
+						source,
+					})
+					.await;
+			}
 			Body::Signed {
 				content_type,
 				bytes,
@@ -400,6 +432,7 @@ impl InnerClient {
 mod tests {
 	use std::collections::BTreeMap;
 
+	use crate::stream::test_source::AlphabetSource;
 	use crate::testserver::ACCEPTING_PATH;
 	use crate::{DeviceInfo, GrindrClient, GrindrError, Method, RawResponse};
 
@@ -426,6 +459,12 @@ mod tests {
 				.await,
 		);
 		assert_invalid(post().bytes("image/jpeg\n", vec![1]).send().await);
+		assert_invalid(
+			post()
+				.stream("video/mp4\n", AlphabetSource::exact(1))
+				.send()
+				.await,
+		);
 		assert_invalid(post().json(&unserializable).send().await);
 		assert_invalid(
 			client
@@ -443,5 +482,18 @@ mod tests {
 		fn assert_static_send<T: Send + 'static>(_: T) {}
 		let client = GrindrClient::new(DeviceInfo::generate(), None).unwrap();
 		assert_static_send(client.request(Method::GET, "/").send());
+	}
+
+	#[tokio::test]
+	async fn an_unauthenticated_stream_needs_no_session() {
+		let client = GrindrClient::new(DeviceInfo::generate(), None).unwrap();
+		let response = client
+			.request(Method::POST, ACCEPTING_PATH)
+			.unauthenticated()
+			.stream("video/mp4", AlphabetSource::exact(1000))
+			.send()
+			.await
+			.unwrap();
+		assert_eq!(response.status, 200);
 	}
 }

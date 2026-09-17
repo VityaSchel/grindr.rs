@@ -147,13 +147,14 @@ pub fn probe_emulation() -> EmulationProvider {
 }
 
 /// okhttp's defaults
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(35);
 
 #[derive(Clone, Copy)]
 pub(crate) struct Timeouts {
 	pub read: Duration,
 	pub upload: Duration,
+	pub stall: Duration,
 }
 
 impl Default for Timeouts {
@@ -161,6 +162,7 @@ impl Default for Timeouts {
 		Self {
 			read: Duration::from_secs(30),
 			upload: Duration::from_secs(120),
+			stall: Duration::from_secs(30),
 		}
 	}
 }
@@ -629,6 +631,19 @@ impl GrindrClient {
 		&self,
 	) -> Result<bool, GrindrError> {
 		crate::auth::recaptcha_first_party_enabled(&self.inner).await
+	}
+}
+
+#[cfg(test)]
+impl GrindrClient {
+	pub(crate) async fn replace_http_client(&self, http: Client) {
+		let mut fingerprint = self.inner.fingerprint.write().await;
+		*fingerprint = Arc::new(Fingerprint {
+			http,
+			ws_http: fingerprint.ws_http.clone(),
+			device: fingerprint.device.clone(),
+			user_agent: fingerprint.user_agent.clone(),
+		});
 	}
 }
 

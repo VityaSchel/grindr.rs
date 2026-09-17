@@ -54,6 +54,7 @@ mod media;
 mod request;
 mod rest;
 mod signing;
+mod stream;
 #[cfg(test)]
 mod testserver;
 #[cfg(test)]
@@ -76,6 +77,7 @@ pub use media::{MediaFetcher, MediaRequest, MediaResponse};
 pub use request::RequestBuilder;
 pub use rest::RawResponse;
 pub use signing::DeviceSigningKey;
+pub use stream::BodySource;
 pub use ws::{WsCommand, WsConnectionState, WsEvent};
 
 /// Request body bytes, re-exported from [`bytes`].

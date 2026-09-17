@@ -632,6 +632,8 @@ dependencies = [
  "bytes",
  "ecdsa",
  "futures-util",
+ "http-body",
+ "http2",
  "httpdate",
  "jsonwebtoken",
  "p256",

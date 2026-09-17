@@ -4,6 +4,7 @@
 //! One server is shared by every test. Tests stay independent by filtering
 //! [`requests_from`] on their own generated device id.
 
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -81,7 +82,30 @@ pub(crate) fn requests_from(device_id: &str) -> Vec<Recorded> {
 		.collect()
 }
 
+thread_local! {
+	static REDIRECTED_BASE_URL: Cell<Option<&'static str>> =
+		const { Cell::new(None) };
+}
+
+pub(crate) struct RedirectedBaseUrl;
+
+impl RedirectedBaseUrl {
+	pub(crate) fn on_this_thread(base_url: String) -> Self {
+		REDIRECTED_BASE_URL.set(Some(base_url.leak()));
+		Self
+	}
+}
+
+impl Drop for RedirectedBaseUrl {
+	fn drop(&mut self) {
+		REDIRECTED_BASE_URL.set(None);
+	}
+}
+
 pub(crate) fn base_url() -> &'static str {
+	if let Some(redirected) = REDIRECTED_BASE_URL.get() {
+		return redirected;
+	}
 	static BASE: OnceLock<String> = OnceLock::new();
 	BASE.get_or_init(|| {
 		let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -129,9 +153,17 @@ fn serve(mut stream: TcpStream) {
 		.find(|(n, _)| n == "content-length")
 		.and_then(|(_, v)| v.parse().ok())
 		.unwrap_or(0);
+	if path == STALLED_PATH {
+		std::thread::sleep(HOLD_BEFORE_CLOSING);
+		return;
+	}
 	let Some(body) = read_body(&mut reader, &path, length) else {
 		return;
 	};
+	if path == SILENT_PATH {
+		std::thread::sleep(HOLD_BEFORE_CLOSING);
+		return;
+	}
 
 	let reply = match path.strip_prefix(MEDIA_PREFIX) {
 		Some(rest) => media_reply(rest, &headers),
@@ -295,6 +327,12 @@ fn queued_reply(lookup: ReplyLookup) -> Option<(&'static str, String)> {
 pub(crate) const LATE_UNAUTHORIZED_PREFIX: &str = "/late-401/";
 
 pub(crate) const ACCEPTING_PATH: &str = "/accepting";
+
+pub(crate) const STALLED_PATH: &str = "/stalled";
+
+pub(crate) const SILENT_PATH: &str = "/silent";
+
+pub(crate) const HOLD_BEFORE_CLOSING: Duration = Duration::from_secs(5);
 
 fn respond(path: &str, headers: &[(String, String)]) -> (&'static str, String) {
 	let path = path.split('?').next().unwrap_or(path);

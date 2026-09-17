@@ -146,6 +146,7 @@ Only the initial request carries a `geohash`; automatic background refreshes nev
 | `.json(body)`                             | JSON body; `None` is sent as `null`               |
 | `.bytes(content_type, body)`              | Raw binary body                                   |
 | `.signed_bytes(content_type, body)`       | Raw binary body signed with the device key        |
+| `.stream(content_type, source)`           | Body read from a `BodySource` while it is sent    |
 | `.unauthenticated()`                      | Leave out the session headers                     |
 | `.send() -> Result<RawResponse>`          | Send and return the response, whatever its status |
 
@@ -204,7 +205,7 @@ Everything under **Identity and session** and **Requests and errors** — except
 
 **Requests and errors**
 
-Every request carries its own timeout — 35 s, matching the app's okhttp `callTimeout`, and 120 s when the body is bytes, so an upload is not cut off by what is meant to be a timeout. There is no need to wrap calls in one of your own.
+Every request carries its own timeout: 35 s, or 120 s when the body is bytes. A streamed body has a stall timeout instead.
 
 - `RawResponse` — `{ status: u16, body: Vec<u8> }`
 - `GrindrError` — the crate error type (`Http`, `Auth`, `Api`, `Unauthorized`, `Banned`, `RateLimited`, `Blocked(BlockKind)`, `InvalidRequest`, `SessionCleared`, `MediaTooLarge { max_bytes }`); `GrindrError::from_response(status, body)` maps a non-success `RawResponse`
@@ -217,6 +218,7 @@ Every request carries its own timeout — 35 s, matching the app's okhttp `callT
 **Request bodies and signing**
 
 - `RequestBuilder` — built by `request`, sent by `send`
+- `BodySource` — trait with `size()` and `open()`, opened again for every attempt
 - `DeviceSigningKey` — persistable P-256 device signing key, scoped to one account and device. `Debug` redacts the key
 
 **Downloads**

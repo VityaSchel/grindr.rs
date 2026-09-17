@@ -253,35 +253,43 @@ fn media_reply(rest: &str, headers: &[(String, String)]) -> Reply {
 	}
 }
 
-type QueuedReplies = HashMap<String, VecDeque<(&'static str, String)>>;
+type ReplyQueues = HashMap<(String, String), VecDeque<(&'static str, String)>>;
 
-fn session_replies() -> &'static Mutex<QueuedReplies> {
-	static QUEUED: OnceLock<Mutex<QueuedReplies>> = OnceLock::new();
-	QUEUED.get_or_init(Mutex::default)
+fn reply_queues() -> &'static Mutex<ReplyQueues> {
+	static QUEUES: OnceLock<Mutex<ReplyQueues>> = OnceLock::new();
+	QUEUES.get_or_init(Mutex::default)
 }
 
-pub(crate) fn queue_session_replies(
-	device_id: &str,
-	replies: impl IntoIterator<Item = (&'static str, String)>,
-) {
-	session_replies()
+pub(crate) struct QueuedReplies<'a> {
+	pub device_id: &'a str,
+	pub path: &'a str,
+	pub replies: Vec<(&'static str, String)>,
+}
+
+pub(crate) fn queue_replies(queued: QueuedReplies) {
+	reply_queues()
 		.lock()
 		.unwrap()
-		.entry(device_id.to_owned())
+		.entry((queued.device_id.to_owned(), queued.path.to_owned()))
 		.or_default()
-		.extend(replies);
+		.extend(queued.replies);
 }
 
-fn queued_session_reply(
-	headers: &[(String, String)],
-) -> Option<(&'static str, String)> {
-	let device = headers
-		.iter()
-		.find(|(name, _)| name == "l-device-info")
-		.map(|(_, value)| value.as_str())?;
-	let mut queued = session_replies().lock().unwrap();
-	let key = queued.keys().find(|id| device.starts_with(*id))?.clone();
-	queued.get_mut(&key)?.pop_front()
+struct ReplyLookup<'a> {
+	device_info: &'a str,
+	path: &'a str,
+}
+
+fn queued_reply(lookup: ReplyLookup) -> Option<(&'static str, String)> {
+	let mut queues = reply_queues().lock().unwrap();
+	let key = queues
+		.keys()
+		.find(|(device_id, path)| {
+			path == lookup.path
+				&& lookup.device_info.starts_with(device_id.as_str())
+		})?
+		.clone();
+	queues.get_mut(&key)?.pop_front()
 }
 
 pub(crate) const LATE_UNAUTHORIZED_PREFIX: &str = "/late-401/";
@@ -289,41 +297,39 @@ pub(crate) const LATE_UNAUTHORIZED_PREFIX: &str = "/late-401/";
 pub(crate) const ACCEPTING_PATH: &str = "/accepting";
 
 fn respond(path: &str, headers: &[(String, String)]) -> (&'static str, String) {
-	match path.split('?').next().unwrap_or(path) {
-		late if late.starts_with(LATE_UNAUTHORIZED_PREFIX) => {
-			let millis = late[LATE_UNAUTHORIZED_PREFIX.len()..]
-				.parse()
-				.unwrap_or_default();
-			std::thread::sleep(Duration::from_millis(millis));
-			(
-				"401 Unauthorized",
-				r#"{"code":401,"message":"unauthorized"}"#.to_owned(),
-			)
+	let path = path.split('?').next().unwrap_or(path);
+	let device_info = headers
+		.iter()
+		.find(|(name, _)| name == "l-device-info")
+		.map(|(_, value)| value.as_str())
+		.unwrap_or_default();
+	if let Some(millis) = path.strip_prefix(LATE_UNAUTHORIZED_PREFIX) {
+		let millis = millis.parse().unwrap_or_default();
+		std::thread::sleep(Duration::from_millis(millis));
+	}
+	if let Some(reply) = queued_reply(ReplyLookup { device_info, path }) {
+		return reply;
+	}
+	match path {
+		late if late.starts_with(LATE_UNAUTHORIZED_PREFIX) => (
+			"401 Unauthorized",
+			r#"{"code":401,"message":"unauthorized"}"#.to_owned(),
+		),
+		slow if slow.starts_with(SLOW_READ_PREFIX) => {
+			("200 OK", "{}".to_owned())
 		}
-		slow if slow.starts_with(SLOW_READ_PREFIX) => ("200 OK", "{}".to_owned()),
 		ACCEPTING_PATH => ("200 OK", "{}".to_owned()),
-		"/v8/sessions" => queued_session_reply(headers).unwrap_or_else(|| {
-			(
-				"200 OK",
-				format!(
-					r#"{{"profileId":"{REFRESHED_PROFILE_ID}","sessionId":"{JWT}","authToken":"refreshed-tok"}}"#
-				),
-			)
-		}),
+		"/v8/sessions" => (
+			"200 OK",
+			format!(
+				r#"{{"profileId":"{REFRESHED_PROFILE_ID}","sessionId":"{JWT}","authToken":"refreshed-tok"}}"#
+			),
+		),
 		"/v1/verification/device-keys/challenge" => {
 			("200 OK", format!(r#"{{"challenge":"{CHALLENGE}"}}"#))
 		}
 		"/v1/verification/device-keys" => ("200 OK", "{}".to_owned()),
 		"/v2/verification/device-keys" => ("200 OK", "{}".to_owned()),
-		"/v5/media/upload" => (
-			"200 OK",
-			r#"{"hash":"media-hash","imageSizes":[]}"#.to_owned(),
-		),
-		"/v5/chat/media/upload" => (
-			"200 OK",
-			r#"{"mediaId":7,"url":"https://cdn/x.jpg","mediaHash":"h"}"#
-				.to_owned(),
-		),
 		"/v3/bootstrap" => ("200 OK", r#"{"ok":true}"#.to_owned()),
 		_ => (
 			"404 Not Found",

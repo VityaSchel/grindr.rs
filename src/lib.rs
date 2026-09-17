@@ -30,9 +30,7 @@
 //! client.login("user@example.com", "hunter2").await?;
 //!
 //! // Make a request — the session token is added for you.
-//! let resp = client
-//!     .request_authenticated_raw(Method::GET, "/v3/me/profile", None)
-//!     .await?;
+//! let resp = client.request(Method::GET, "/v3/me/profile").send().await?;
 //! println!("status = {}", resp.status);
 //! # Ok(())
 //! # }
@@ -53,6 +51,7 @@ mod device;
 mod error;
 mod headers;
 mod media;
+mod request;
 mod rest;
 mod signing;
 #[cfg(test)]
@@ -74,16 +73,12 @@ pub use headers::{
 	GrindrHeaders, APP_VERSION,
 };
 pub use media::{MediaFetcher, MediaRequest, MediaResponse};
+pub use request::RequestBuilder;
 pub use rest::RawResponse;
-pub use signing::{
-	requires_device_signature, DeviceSigningKey, MediaUploadResponse,
-	UploadProfileImageResponse, UploadedProfileImage,
-};
+pub use signing::DeviceSigningKey;
 pub use ws::{WsCommand, WsConnectionState, WsEvent};
 
-/// Request body bytes, re-exported from [`bytes`] for use with
-/// [`GrindrClient::request_authenticated_bytes`].
+/// Request body bytes, re-exported from [`bytes`].
 pub use bytes::Bytes;
-/// HTTP method, re-exported from [`wreq`] for use with
-/// [`GrindrClient::request_authenticated_raw`].
+/// HTTP method, re-exported from [`wreq`].
 pub use wreq::Method;

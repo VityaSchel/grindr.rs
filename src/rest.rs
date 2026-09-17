@@ -2,20 +2,17 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bytes::Bytes;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::de::DeserializeOwned;
 use tokio::sync::watch;
-use wreq::header::HeaderMap;
-use wreq::{Client, Method, RequestBuilder};
+use wreq::header::{HeaderMap, HeaderValue};
+use wreq::{Client, Method};
 
 use crate::auth::AuthState;
-use crate::client::{Timeouts, CALL_TIMEOUT};
+use crate::client::Timeouts;
 use crate::device::DeviceInfo;
 use crate::error::{BanInfo, BanKind, BlockKind, GrindrError};
-use crate::headers::GrindrHeaders;
-use crate::signing::{
-	signing_reject, DeviceKey, DeviceSigningKey, SigningReject,
-};
+use crate::request::{Access, Body, Request};
+use crate::signing::{DeviceKey, DeviceSigningKey};
 
 #[cfg(not(test))]
 pub(crate) fn base_url() -> &'static str {
@@ -32,7 +29,7 @@ pub(crate) fn base_url() -> &'static str {
 ///
 /// `format!("{}{path}", base_url())` keeps the request on `grindr.mobi` only
 /// when `path` starts with `/`.
-fn validate_path(path: &str) -> Result<(), GrindrError> {
+pub(crate) fn validate_path(path: &str) -> Result<(), GrindrError> {
 	if path.starts_with('/') {
 		Ok(())
 	} else {
@@ -42,13 +39,7 @@ fn validate_path(path: &str) -> Result<(), GrindrError> {
 	}
 }
 
-/// A raw API response: the HTTP status and the unparsed body bytes.
-///
-/// Returned by
-/// [`GrindrClient::request_authenticated_raw`](crate::GrindrClient::request_authenticated_raw)
-/// and
-/// [`GrindrClient::request_authenticated_bytes`](crate::GrindrClient::request_authenticated_bytes)
-/// so callers can deserialize the body into whatever type the endpoint returns.
+/// The status and unparsed body of a response.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RawResponse {
 	/// HTTP status code.
@@ -66,24 +57,23 @@ pub struct Fingerprint {
 	pub user_agent: String,
 }
 
-/// Payload of an authenticated request.
-///
-/// Kept by reference across the internal 401-refresh retry, so the raw variant
-/// holds [`Bytes`] (cloning is a refcount bump, not a copy).
-pub(crate) enum RequestBody {
-	Json(serde_json::Value),
-	Raw { content_type: String, bytes: Bytes },
+pub(crate) const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
+
+pub(crate) const ACCEPT_ENCODING: &str = "accept-encoding";
+
+pub(crate) struct BodyHeaders<'a> {
+	pub content_type: &'a HeaderValue,
+	pub length: u64,
 }
 
-const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
-
-const ACCEPT_ENCODING: &str = "accept-encoding";
-
-fn json_body<T: Serialize + ?Sized>(
-	req: RequestBuilder,
-	body: &T,
-) -> RequestBuilder {
-	req.header("content-type", JSON_CONTENT_TYPE).json(body)
+impl BodyHeaders<'_> {
+	pub(crate) fn apply(
+		self,
+		req: wreq::RequestBuilder,
+	) -> wreq::RequestBuilder {
+		req.header("content-type", self.content_type)
+			.header("content-length", self.length.to_string())
+	}
 }
 
 #[derive(Clone, Copy)]
@@ -101,10 +91,10 @@ impl RequiredDeviceInfo {
 	}
 }
 
-fn apply_required_device_info(
-	req: RequestBuilder,
+pub(crate) fn apply_required_device_info(
+	req: wreq::RequestBuilder,
 	required: Option<RequiredDeviceInfo>,
-) -> RequestBuilder {
+) -> wreq::RequestBuilder {
 	match required {
 		Some(variant) => req.header(variant.header_name(), "true"),
 		None => req,
@@ -157,11 +147,7 @@ impl InnerClient {
 		}
 	}
 
-	/// Tracks the local↔server clock skew from a response's `Date` header, so
-	/// signed uploads carry an `X-Timestamp` the server accepts (the app corrects
-	/// this reactively on a `timestamp_drift` rejection; seeding from `Date`
-	/// avoids that round-trip).
-	fn note_server_date(&self, headers: &HeaderMap) {
+	pub(crate) fn note_server_date(&self, headers: &HeaderMap) {
 		let server_ms = headers
 			.get("date")
 			.and_then(|v| v.to_str().ok())
@@ -174,232 +160,9 @@ impl InnerClient {
 		}
 	}
 
-	fn synced_now_ms(&self) -> u64 {
+	pub(crate) fn synced_now_ms(&self) -> u64 {
 		(local_now_ms() + self.server_offset_ms.load(Ordering::Relaxed)).max(0)
 			as u64
-	}
-
-	fn apply_headers(
-		mut req: RequestBuilder,
-		items: &[(wreq::header::HeaderName, wreq::header::HeaderValue)],
-	) -> RequestBuilder {
-		for (name, value) in items {
-			req = req.header(name.clone(), value.clone());
-		}
-		req
-	}
-
-	fn apply_body(
-		req: RequestBuilder,
-		body: Option<&RequestBody>,
-	) -> RequestBuilder {
-		match body {
-			Some(RequestBody::Json(b)) => match serde_json::to_vec(b) {
-				Ok(bytes) => req
-					.header("content-type", JSON_CONTENT_TYPE)
-					.header("content-length", bytes.len().to_string())
-					.body(bytes),
-				Err(_) => json_body(req, b),
-			},
-			Some(RequestBody::Raw {
-				content_type,
-				bytes,
-			}) => req
-				.header("content-type", content_type)
-				.header("content-length", bytes.len().to_string())
-				.body(bytes.clone()),
-			None => req,
-		}
-	}
-
-	fn apply_headers_then_body(
-		req: RequestBuilder,
-		items: &[(wreq::header::HeaderName, wreq::header::HeaderValue)],
-		body: Option<&RequestBody>,
-	) -> RequestBuilder {
-		let mut req = Self::apply_headers(
-			req,
-			&items
-				.iter()
-				.filter(|(n, _)| n.as_str() != ACCEPT_ENCODING)
-				.cloned()
-				.collect::<Vec<_>>(),
-		);
-		req = Self::apply_body(req, body);
-		for (name, value) in
-			items.iter().filter(|(n, _)| n.as_str() == ACCEPT_ENCODING)
-		{
-			req = req.header(name.clone(), value.clone());
-		}
-		req
-	}
-
-	pub(crate) fn apply_call_timeouts(
-		&self,
-		req: RequestBuilder,
-		body: Option<&RequestBody>,
-	) -> RequestBuilder {
-		match body {
-			Some(RequestBody::Raw { .. }) => self.apply_upload_timeouts(req),
-			_ => req.timeout(CALL_TIMEOUT),
-		}
-	}
-
-	fn apply_upload_timeouts(&self, req: RequestBuilder) -> RequestBuilder {
-		req.timeout(self.timeouts.upload)
-			.read_timeout(self.timeouts.upload)
-	}
-
-	pub async fn request_no_auth<TReq, TResp>(
-		&self,
-		method: Method,
-		path: &str,
-		body: Option<&TReq>,
-		required_device_info: Option<RequiredDeviceInfo>,
-	) -> Result<TResp, GrindrError>
-	where
-		TReq: Serialize + ?Sized,
-		TResp: DeserializeOwned,
-	{
-		validate_path(path)?;
-		let fp = self.fingerprint().await;
-		let headers =
-			GrindrHeaders::build(&fp.device, &fp.user_agent, None, None)?;
-
-		let json = body
-			.map(serde_json::to_value)
-			.transpose()
-			.ok()
-			.flatten()
-			.map(RequestBody::Json);
-		let mut req = Self::apply_headers_then_body(
-			apply_required_device_info(
-				fp.http.request(method, format!("{}{path}", base_url())),
-				required_device_info,
-			),
-			&headers.items,
-			json.as_ref(),
-		);
-		req = req.timeout(CALL_TIMEOUT);
-
-		let resp = req.send().await?;
-		self.note_server_date(resp.headers());
-		if !resp.status().is_success() {
-			let status = resp.status().as_u16();
-			let bytes = resp.bytes().await.unwrap_or_default();
-			return Err(parse_api_error(&bytes, status));
-		}
-		resp.json::<TResp>().await.map_err(Into::into)
-	}
-
-	pub async fn request_no_auth_raw(
-		&self,
-		method: Method,
-		path: &str,
-		body: Option<RequestBody>,
-	) -> Result<RawResponse, GrindrError> {
-		validate_path(path)?;
-
-		let fp = self.fingerprint().await;
-		let headers =
-			GrindrHeaders::build(&fp.device, &fp.user_agent, None, None)?;
-
-		let req = Self::apply_headers_then_body(
-			fp.http.request(method, format!("{}{path}", base_url())),
-			&headers.items,
-			body.as_ref(),
-		);
-		let req = self.apply_call_timeouts(req, body.as_ref());
-
-		let resp = req.send().await?;
-		self.note_server_date(resp.headers());
-		let status = resp.status().as_u16();
-		let body_bytes = resp.bytes().await?.to_vec();
-		raw_or_blocked(status, body_bytes)
-	}
-
-	pub async fn request_authenticated(
-		&self,
-		auth: &AuthState,
-		method: Method,
-		path: &str,
-		body: Option<RequestBody>,
-		extra_headers: &[(
-			wreq::header::HeaderName,
-			wreq::header::HeaderValue,
-		)],
-	) -> Result<RawResponse, GrindrError> {
-		validate_path(path)?;
-
-		let mut authorization = crate::auth::authorize(self, auth).await?;
-		let mut retried = false;
-		loop {
-			let fp = self.fingerprint().await;
-			let mut headers = GrindrHeaders::build(
-				&fp.device,
-				&fp.user_agent,
-				Some(&authorization.header()),
-				Some("[FREE]"),
-			)?;
-			headers.items.extend_from_slice(extra_headers);
-
-			let req = Self::apply_headers_then_body(
-				fp.http
-					.request(method.clone(), format!("{}{path}", base_url())),
-				&headers.items,
-				body.as_ref(),
-			);
-			let req = self.apply_call_timeouts(req, body.as_ref());
-
-			let resp = req.send().await?;
-			self.note_server_date(resp.headers());
-			let status = resp.status().as_u16();
-			let body_bytes = resp.bytes().await?.to_vec();
-
-			if status == 401 && !retried {
-				retried = true;
-				if crate::auth::refresh_after_unauthorized(
-					self,
-					auth,
-					&authorization.session_id,
-				)
-				.await
-				{
-					authorization = crate::auth::reauthorize_same_profile(
-						self,
-						auth,
-						&authorization,
-					)
-					.await?;
-					continue;
-				}
-			}
-
-			return raw_or_blocked(status, body_bytes);
-		}
-	}
-
-	async fn authed_json<T: DeserializeOwned>(
-		&self,
-		auth: &AuthState,
-		method: Method,
-		path: &str,
-		body: Option<serde_json::Value>,
-	) -> Result<T, GrindrError> {
-		let resp = self
-			.request_authenticated(
-				auth,
-				method,
-				path,
-				body.map(RequestBody::Json),
-				&[],
-			)
-			.await?;
-		if !(200..300).contains(&resp.status) {
-			return Err(parse_api_error(&resp.body, resp.status));
-		}
-		serde_json::from_slice(&resp.body)
-			.map_err(|e| GrindrError::Http(e.to_string()))
 	}
 
 	/// Refreshes first, so the blank profile id a token-resumed session starts
@@ -430,23 +193,25 @@ impl InnerClient {
 		let android_id = self.fingerprint().await.device.device_id.clone();
 		let key = DeviceKey::generate(user_id);
 
-		let challenge: crate::signing::ChallengeResponse = self
-			.authed_json(
-				auth,
-				Method::POST,
-				"/v1/verification/device-keys/challenge",
-				None,
+		let challenge: crate::signing::ChallengeResponse = parse_json(
+			self.exchange(
+				Access::Session(auth),
+				&Request::new(
+					Method::POST,
+					"/v1/verification/device-keys/challenge",
+					Body::Empty,
+				),
 			)
-			.await?;
+			.await?,
+		)?;
 
 		let registration_signature =
 			key.registration_signature(&android_id, &challenge.challenge);
-		let body = serde_json::to_value(crate::signing::RegisterKeyRequest {
+		let body = Body::json(&crate::signing::RegisterKeyRequest {
 			public_key: key.public_key(),
 			key_id: key.key_id(),
 			registration_signature: &registration_signature,
-		})
-		.map_err(|e| GrindrError::Http(e.to_string()))?;
+		})?;
 
 		let captcha =
 			match self.captcha.get() {
@@ -455,35 +220,27 @@ impl InnerClient {
 					.await,
 				None => None,
 			};
-		let resp = match captcha {
+		let registration = match captcha {
 			Some(token) => {
-				let header = (
+				let mut request = Request::new(
+					Method::POST,
+					"/v2/verification/device-keys",
+					body,
+				);
+				request.extra_headers.push((
 					wreq::header::HeaderName::from_static(
 						"x-grindr-captcha-token",
 					),
 					wreq::header::HeaderValue::from_str(&token)
 						.map_err(|e| GrindrError::Http(e.to_string()))?,
-				);
-				self.request_authenticated(
-					auth,
-					Method::POST,
-					"/v2/verification/device-keys",
-					Some(RequestBody::Json(body)),
-					&[header],
-				)
-				.await?
+				));
+				request
 			}
 			None => {
-				self.request_authenticated(
-					auth,
-					Method::POST,
-					"/v1/verification/device-keys",
-					Some(RequestBody::Json(body)),
-					&[],
-				)
-				.await?
+				Request::new(Method::POST, "/v1/verification/device-keys", body)
 			}
 		};
+		let resp = self.exchange(Access::Session(auth), &registration).await?;
 		if !(200..300).contains(&resp.status) {
 			return Err(parse_api_error(&resp.body, resp.status));
 		}
@@ -492,101 +249,6 @@ impl InnerClient {
 		*guard = Some(key);
 		let _ = self.signing_key_tx.send(Some(exported));
 		Ok(())
-	}
-
-	pub async fn request_signed(
-		&self,
-		auth: &AuthState,
-		method: Method,
-		path: &str,
-		content_type: &str,
-		body: Bytes,
-	) -> Result<RawResponse, GrindrError> {
-		validate_path(path)?;
-		self.ensure_device_key(auth).await?;
-
-		let mut authorization = crate::auth::authorize(self, auth).await?;
-		let mut refreshed = false;
-		let mut resigned = false;
-		loop {
-			let fp = self.fingerprint().await;
-			let android_id = fp.device.device_id.clone();
-			let timestamp = self.synced_now_ms();
-			let signature = {
-				let guard = self.signing.lock().await;
-				guard
-					.as_ref()
-					.ok_or_else(|| {
-						GrindrError::Auth(
-							"device key not registered".to_owned(),
-						)
-					})?
-					.upload_headers(&android_id, &body, timestamp)
-			};
-
-			let headers = GrindrHeaders::build(
-				&fp.device,
-				&fp.user_agent,
-				Some(&authorization.header()),
-				Some("[FREE]"),
-			)?;
-			let req = Self::apply_headers(
-				fp.http
-					.request(method.clone(), format!("{}{path}", base_url())),
-				&headers.items,
-			);
-			let req = self
-				.apply_upload_timeouts(req)
-				.header("x-key-id", &signature.key_id)
-				.header("x-sig", &signature.signature)
-				.header("x-timestamp", signature.timestamp.to_string())
-				.header("x-nonce", &signature.nonce)
-				.header("content-type", content_type)
-				.body(body.clone());
-
-			let resp = req.send().await?;
-			self.note_server_date(resp.headers());
-			let status = resp.status().as_u16();
-			let body_bytes = resp.bytes().await?.to_vec();
-
-			if status == 401 && !refreshed {
-				refreshed = true;
-				if crate::auth::refresh_after_unauthorized(
-					self,
-					auth,
-					&authorization.session_id,
-				)
-				.await
-				{
-					authorization = crate::auth::reauthorize_same_profile(
-						self,
-						auth,
-						&authorization,
-					)
-					.await?;
-					continue;
-				}
-			}
-
-			if !(200..300).contains(&status) {
-				match signing_reject(&body_bytes) {
-					Some(SigningReject::Retryable) if !resigned => {
-						resigned = true;
-						authorization = crate::auth::reauthorize_same_profile(
-							self,
-							auth,
-							&authorization,
-						)
-						.await?;
-						continue;
-					}
-					Some(SigningReject::Fatal) => self.clear_signing().await,
-					_ => {}
-				}
-			}
-
-			return raw_or_blocked(status, body_bytes);
-		}
 	}
 }
 
@@ -647,7 +309,17 @@ pub(crate) fn block_kind(status: u16, body: &[u8]) -> Option<BlockKind> {
 	})
 }
 
-fn raw_or_blocked(
+pub(crate) fn parse_json<T: DeserializeOwned>(
+	response: RawResponse,
+) -> Result<T, GrindrError> {
+	if !(200..300).contains(&response.status) {
+		return Err(parse_api_error(&response.body, response.status));
+	}
+	serde_json::from_slice(&response.body)
+		.map_err(|e| GrindrError::Http(e.to_string()))
+}
+
+pub(crate) fn raw_or_blocked(
 	status: u16,
 	body: Vec<u8>,
 ) -> Result<RawResponse, GrindrError> {
@@ -1221,7 +893,8 @@ mod tests {
 		)
 		.unwrap();
 		refreshing
-			.request_authenticated_raw(Method::GET, "/v3/bootstrap", None)
+			.request(Method::GET, "/v3/bootstrap")
+			.send()
 			.await
 			.unwrap();
 

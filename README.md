@@ -49,9 +49,7 @@ async fn main() -> Result<(), grindr::GrindrError> {
     // Session token is added automatically
     // API reference: <https://opengrind.org/grindr-api/>
     // Dev tool: <https://git.opengrind.org/open-grind/grindr-api-dev-tool>
-    let resp = client
-        .request_authenticated_raw(Method::GET, "/v3/me/profile", None)
-        .await?;
+    let resp = client.request(Method::GET, "/v3/me/profile").send().await?;
     println!("status {}", resp.status);
     let profile: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
     println!("{profile:#?}");
@@ -114,7 +112,7 @@ Full generated docs: <https://docs.rs/grindr>.
 
 ### `GrindrClient`
 
-All methods are `async` except `new`, `signing_key_receiver`, `session_receiver`, `auth_event_receiver`, `connection_state`, `ws_receiver` and `ws_sender`.
+All methods are `async` except `new`, `request`, `set_active`, `is_active`, `set_captcha_provider`, `signing_key_receiver`, `session_receiver`, `auth_event_receiver`, `connection_state`, `ws_receiver` and `ws_sender`.
 
 #### Setup and device identity
 
@@ -142,16 +140,16 @@ Only the initial request carries a `geohash`; automatic background refreshes nev
 
 #### Requests
 
-| Method                                                                                 | Description                                                             |
-| -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `request_authenticated_raw(method, path, body) -> Result<RawResponse>`                 | Authenticated JSON call returning the raw status + body                 |
-| `request_authenticated_bytes(method, path, content_type, body) -> Result<RawResponse>` | Same, with a raw binary body                                            |
-| `request_signed_bytes(method, path, content_type, body) -> Result<RawResponse>`        | Same, plus device-key signing — for upload paths that require it        |
-| `request_no_auth_raw(method, path, body) -> Result<RawResponse>`                       | Unauthenticated call on the same transport — sign-in, bootstrap, probes |
+| Method                                    | Description                                       |
+| ----------------------------------------- | ------------------------------------------------- |
+| `request(method, path) -> RequestBuilder` | Start a request, sent with the session by default |
+| `.json(body)`                             | JSON body; `None` is sent as `null`               |
+| `.bytes(content_type, body)`              | Raw binary body                                   |
+| `.signed_bytes(content_type, body)`       | Raw binary body signed with the device key        |
+| `.unauthenticated()`                      | Leave out the session headers                     |
+| `.send() -> Result<RawResponse>`          | Send and return the response, whatever its status |
 
 `path` must start with `/`, otherwise you get `GrindrError::InvalidRequest`.
-
-`requires_device_signature(path)` tells you which paths need `request_signed_bytes` rather than `request_authenticated_bytes`.
 
 #### Media downloads
 
@@ -161,18 +159,15 @@ Only the initial request carries a `geohash`; automatic background refreshes nev
 
 Only `https` on `cdns.grindr.com` or `*.cloudfront.net` is accepted, redirects included; anything else is `GrindrError::InvalidRequest` before a socket is opened. Non-success status returns as `MediaResponse`.
 
-#### Media uploads
+#### Device key
 
-Signed uploads register an ephemeral P-256 device key on first use. Persist it to avoid re-registering.
+Signed requests register an ephemeral P-256 device key on first use.
 
-| Method                                                                                                    | Description                                                                          |
-| --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `upload_profile_image(jpeg, thumb_coords, taken_on_grindr) -> Result<UploadProfileImageResponse>`         | Signed `POST /v5/media/upload`                                                       |
-| `upload_chat_media(bytes, content_type, length, looping, taken_on_grindr) -> Result<MediaUploadResponse>` | Signed `POST /v6/chat/media/upload`                                                  |
-| `upload_chat_media_unsigned(bytes, content_type) -> Result<MediaUploadResponse>`                          | Unsigned `POST /v5/chat/media/upload`, for media the user did not capture in the app |
-| `register_device_key() -> Result<()>`                                                                     | Register the device signing key unless one exists                                    |
-| `restore_signing_key(key) -> bool`                                                                        | Restore a persisted `DeviceSigningKey`; refused if it belongs to another account     |
-| `signing_key_receiver() -> watch::Receiver<Option<DeviceSigningKey>>`                                     | Watch the signing key so you can save it                                             |
+| Method                                                                | Description                                                                      |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `register_device_key() -> Result<()>`                                 | Register the device signing key unless one exists                                |
+| `restore_signing_key(key) -> bool`                                    | Restore a persisted `DeviceSigningKey`; refused if it belongs to another account |
+| `signing_key_receiver() -> watch::Receiver<Option<DeviceSigningKey>>` | Watch the signing key so you can save it                                         |
 
 #### Realtime websocket
 
@@ -194,7 +189,7 @@ Signed uploads register an ephemeral P-256 device key on first use. Persist it t
 
 ### Types
 
-Everything under **Identity and session** and **Requests and errors** — except `RawResponse` — is `#[non_exhaustive]`, so match those enums with a wildcard arm. The **Uploads** and **Websocket** types are ordinary.
+Everything under **Identity and session** and **Requests and errors** — except `RawResponse` — is `#[non_exhaustive]`, so match those enums with a wildcard arm. The **Request bodies and signing** and **Websocket** types are ordinary.
 
 **Identity and session**
 
@@ -212,19 +207,17 @@ Everything under **Identity and session** and **Requests and errors** — except
 Every request carries its own timeout — 35 s, matching the app's okhttp `callTimeout`, and 120 s when the body is bytes, so an upload is not cut off by what is meant to be a timeout. There is no need to wrap calls in one of your own.
 
 - `RawResponse` — `{ status: u16, body: Vec<u8> }`
-- `GrindrError` — the crate error type (`Http`, `Auth`, `Api`, `Unauthorized`, `Banned`, `RateLimited`, `Blocked(BlockKind)`, `InvalidRequest`, `SessionCleared`, `MediaTooLarge { max_bytes }`); `GrindrError::from_response(status, body)` maps a non-success `RawResponse` the same way the typed methods do
+- `GrindrError` — the crate error type (`Http`, `Auth`, `Api`, `Unauthorized`, `Banned`, `RateLimited`, `Blocked(BlockKind)`, `InvalidRequest`, `SessionCleared`, `MediaTooLarge { max_bytes }`); `GrindrError::from_response(status, body)` maps a non-success `RawResponse`
 - `BlockKind` — `Cloudflare` for Cloudflare block page or "Just a moment..." challenge, `Edge` for anything else
 - `BanInfo` — `{ kind, code, message, reason, sub_reason, automated }`
 - `BanKind` — `Profile` / `Device` / `Network` / `Underage`
 - `AuthEvent` — `LoggedOut` / `Banned(BanInfo)` / `RefreshFailed { message, kind }` / `RefreshRecovered` from background refreshes
 - `RefreshFailureKind` — why a refresh failed: `Transport` / `Blocked` / `RateLimited` / `Server` / `Session`, with `is_transient()`
 
-**Uploads**
+**Request bodies and signing**
 
-- `DeviceSigningKey` — persistable P-256 upload signing key, scoped to one account and device. `Debug` redacts the key
-- `UploadProfileImageResponse` — `{ hash, image_sizes }`
-- `UploadedProfileImage` — `{ media_hash, full_url, state, thumbnail, size }`
-- `MediaUploadResponse` — `{ media_id, url, media_hash }`
+- `RequestBuilder` — built by `request`, sent by `send`
+- `DeviceSigningKey` — persistable P-256 device signing key, scoped to one account and device. `Debug` redacts the key
 
 **Downloads**
 
@@ -241,8 +234,8 @@ The socket pings every 10 s like the app does, and refuses inbound frames and me
 
 **Re-exports**
 
-- `Method` — re-exported `wreq::Method` for `request_authenticated_raw`
-- `Bytes` — re-exported `bytes::Bytes` for `request_authenticated_bytes`
+- `Method` — re-exported `wreq::Method` for `request`
+- `Bytes` — re-exported `bytes::Bytes` for `bytes` and `signed_bytes`
 
 ### Low-level helpers
 
@@ -253,7 +246,6 @@ For building your own `wreq::Client` with an identical fingerprint:
 - `build_device_info_header(device) -> String` — `L-Device-Info` value
 - `GrindrHeaders::build(device, ua, authorization, roles)` — full and correctly ordered headers list
 - `GrindrHeaders::build_media(ua, range)` — the CDN header list `fetch_media` sends
-- `requires_device_signature(path) -> bool` — whether an upload path needs the device signature headers
 - `APP_VERSION` — the Grindr APK version this crate emulates
 
 ## Examples

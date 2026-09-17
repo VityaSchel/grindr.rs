@@ -1,7 +1,6 @@
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
-use bytes::Bytes;
 use tokio::sync::{broadcast, mpsc, watch};
 use wreq::{
 	header::HeaderName, Client, EmulationProvider, Http1Config, Http2Config,
@@ -13,10 +12,9 @@ use crate::device::DeviceInfo;
 use crate::error::GrindrError;
 use crate::headers::build_user_agent;
 use crate::media::{MediaRequest, MediaResponse};
-use crate::rest::{Fingerprint, InnerClient, RawResponse, RequestBody};
-use crate::signing::{
-	DeviceSigningKey, MediaUploadResponse, UploadProfileImageResponse,
-};
+use crate::request::RequestBuilder;
+use crate::rest::{Fingerprint, InnerClient};
+use crate::signing::DeviceSigningKey;
 use crate::ws::{
 	make_channels, WsChannels, WsCommand, WsConnectionState, WsEvent,
 };
@@ -219,16 +217,6 @@ fn build_fingerprint(
 	}))
 }
 
-fn parse_json<T: serde::de::DeserializeOwned>(
-	resp: RawResponse,
-) -> Result<T, GrindrError> {
-	if !(200..300).contains(&resp.status) {
-		return Err(GrindrError::from_response(resp.status, &resp.body));
-	}
-	serde_json::from_slice(&resp.body)
-		.map_err(|e| GrindrError::Http(e.to_string()))
-}
-
 /// Everything needed to start the background websocket task.
 struct WsSpawn {
 	inner: Arc<InnerClient>,
@@ -242,7 +230,7 @@ struct WsSpawn {
 /// Cheap to [`Clone`] — clones share the connection pool, session, and the
 /// background websocket task. Build one with [`new`](Self::new), log in with
 /// [`login`](Self::login) or [`google_sign_in`](Self::google_sign_in), then make
-/// requests with [`request_authenticated_raw`](Self::request_authenticated_raw).
+/// requests with [`request`](Self::request).
 ///
 /// The realtime websocket is opt-in: REST works on its own and never opens a
 /// socket. Call [`connect`](Self::connect) when you want realtime, then read
@@ -358,23 +346,16 @@ impl GrindrClient {
 		self.session_rx.clone()
 	}
 
-	/// Watches the current [`DeviceSigningKey`] (used to sign media uploads).
-	///
-	/// It changes when a key is registered on first upload (save it in secure
-	/// storage alongside the session) and clears on [`logout`](Self::logout) /
-	/// [`rotate_device`](Self::rotate_device). Restore a saved one with
-	/// [`restore_signing_key`](Self::restore_signing_key) to avoid re-registering.
+	/// Watches the [`DeviceSigningKey`]; it clears on [`logout`](Self::logout)
+	/// and [`rotate_device`](Self::rotate_device).
 	pub fn signing_key_receiver(
 		&self,
 	) -> watch::Receiver<Option<DeviceSigningKey>> {
 		self.signing_key_rx.clone()
 	}
 
-	/// Restores a persisted [`DeviceSigningKey`] so uploads reuse it instead of
-	/// registering a fresh key.
-	///
-	/// Returns whether it was taken: a key that can't be decoded, or that was
-	/// saved for a different account than the current session, is refused.
+	/// Restores a saved [`DeviceSigningKey`] and returns whether it was taken;
+	/// a key that cannot be decoded or belongs to another account is refused.
 	#[must_use]
 	pub async fn restore_signing_key(&self, key: DeviceSigningKey) -> bool {
 		self.inner.restore_signing_key(&self.auth, key).await
@@ -423,15 +404,7 @@ impl GrindrClient {
 		self.ws_cmd_tx.clone()
 	}
 
-	/// Opts in to the realtime websocket, starting the shared background task if
-	/// it isn't running yet.
-	///
-	/// The websocket is never started automatically. REST calls like
-	/// [`request_authenticated_raw`](Self::request_authenticated_raw) work
-	/// without it. Call this once (from any clone) when you want realtime events
-	/// from [`ws_receiver`](Self::ws_receiver); the task connects as soon as
-	/// there's a session and reconnects on its own. Calling it again does
-	/// nothing.
+	/// Starts the shared websocket task unless it is running.
 	pub async fn connect(&self) {
 		self.ensure_ws_task();
 	}
@@ -563,169 +536,19 @@ impl GrindrClient {
 		self.inner.clear_signing().await;
 	}
 
-	/// Makes an authenticated request and returns the raw status and body.
-	///
-	/// `path` is added to the API base URL and must start with `/` (e.g.
-	/// `/v3/me/profile`), otherwise you get [`GrindrError::InvalidRequest`]. The
-	/// session token is added for you, refreshing first if it's about to expire.
-	/// The body comes back as-is for you to deserialize, including non-success
-	/// statuses; map those with [`GrindrError::from_response`]. An edge
-	/// interstitial (a `403` that isn't JSON, or a Cloudflare challenge) turns
-	/// into [`GrindrError::Blocked`] instead.
-	///
-	/// This crate doesn't ship response types. See the API reference at
-	/// <https://opengrind.org/grindr-api/> and the dev tool at
-	/// <https://git.opengrind.org/open-grind/grindr-api-dev-tool>.
-	pub async fn request_authenticated_raw(
-		&self,
-		method: Method,
-		path: &str,
-		body: Option<serde_json::Value>,
-	) -> Result<RawResponse, GrindrError> {
-		self.inner
-			.request_authenticated(
-				&self.auth,
-				method,
-				path,
-				body.map(RequestBody::Json),
-				&[],
-			)
-			.await
-	}
-
-	/// Makes an unauthenticated request and returns the raw status and body, for
-	/// the endpoints that take no session (sign-in, `/v3/bootstrap`, feature
-	/// probes).
-	///
-	/// Same transport and path rules as
-	/// [`request_authenticated_raw`](Self::request_authenticated_raw), without
-	/// the `Authorization` and `L-Grindr-Roles` headers.
-	pub async fn request_no_auth_raw(
-		&self,
-		method: Method,
-		path: &str,
-		body: Option<serde_json::Value>,
-	) -> Result<RawResponse, GrindrError> {
-		self.inner
-			.request_no_auth_raw(method, path, body.map(RequestBody::Json))
-			.await
-	}
-
-	/// Like [`request_authenticated_raw`](Self::request_authenticated_raw), but
-	/// sends a raw binary body with the given `Content-Type` instead of JSON —
-	/// for endpoints like `POST /v6/chat/media/upload` that take the file bytes
-	/// as the body.
-	///
-	/// `body` accepts anything convertible to [`Bytes`]; a `Vec<u8>` converts
-	/// without copying. Non-success statuses come back as a normal
-	/// [`RawResponse`]; map them with [`GrindrError::from_response`] to get the
-	/// same errors the crate's typed methods return. An edge interstitial turns
-	/// into [`GrindrError::Blocked`].
-	pub async fn request_authenticated_bytes(
-		&self,
-		method: Method,
-		path: &str,
-		content_type: &str,
-		body: impl Into<Bytes>,
-	) -> Result<RawResponse, GrindrError> {
-		self.inner
-			.request_authenticated(
-				&self.auth,
-				method,
-				path,
-				Some(RequestBody::Raw {
-					content_type: content_type.to_owned(),
-					bytes: body.into(),
-				}),
-				&[],
-			)
-			.await
+	/// Starts a request to `path`, which must start with `/`.
+	pub fn request(&self, method: Method, path: &str) -> RequestBuilder {
+		RequestBuilder::new(
+			Arc::clone(&self.inner),
+			Arc::clone(&self.auth),
+			method,
+			path,
+		)
 	}
 
 	/// Registers the device signing key unless one exists.
 	pub async fn register_device_key(&self) -> Result<(), GrindrError> {
 		self.inner.ensure_device_key(&self.auth).await
-	}
-
-	/// Sends a device-key-signed request with a raw binary body, for the upload
-	/// endpoints that require it (`/v5/media/upload`, `/v6/chat/media/upload`).
-	///
-	/// On first use it registers an ephemeral P-256 key for the session; the key
-	/// is dropped on [`logout`](Self::logout) and [`rotate_device`](Self::rotate_device).
-	/// Prefer [`upload_profile_image`](Self::upload_profile_image) /
-	/// [`upload_chat_media`](Self::upload_chat_media) unless you need another path.
-	pub async fn request_signed_bytes(
-		&self,
-		method: Method,
-		path: &str,
-		content_type: &str,
-		body: impl Into<Bytes>,
-	) -> Result<RawResponse, GrindrError> {
-		self.inner
-			.request_signed(&self.auth, method, path, content_type, body.into())
-			.await
-	}
-
-	/// Uploads a profile image via signed `POST /v5/media/upload`.
-	///
-	/// `thumb_coords` is an optional `"x,y,w,h"` crop; `taken_on_grindr` marks
-	/// images captured in-app.
-	pub async fn upload_profile_image(
-		&self,
-		jpeg: impl Into<Bytes>,
-		thumb_coords: Option<&str>,
-		taken_on_grindr: bool,
-	) -> Result<UploadProfileImageResponse, GrindrError> {
-		let mut path =
-			format!("/v5/media/upload?takenOnGrindr={taken_on_grindr}");
-		if let Some(coords) = thumb_coords {
-			path.push_str("&thumbCoords=");
-			path.push_str(coords);
-		}
-		let resp = self
-			.request_signed_bytes(Method::POST, &path, "image/jpeg", jpeg)
-			.await?;
-		parse_json(resp)
-	}
-
-	/// Uploads chat media via unsigned `POST /v5/chat/media/upload`.
-	pub async fn upload_chat_media_unsigned(
-		&self,
-		bytes: impl Into<Bytes>,
-		content_type: &str,
-	) -> Result<MediaUploadResponse, GrindrError> {
-		let resp = self
-			.request_authenticated_bytes(
-				Method::POST,
-				"/v5/chat/media/upload?takenOnGrindr=false",
-				content_type,
-				bytes,
-			)
-			.await?;
-		parse_json(resp)
-	}
-
-	/// Uploads chat media via signed `POST /v6/chat/media/upload`.
-	pub async fn upload_chat_media(
-		&self,
-		bytes: impl Into<Bytes>,
-		content_type: &str,
-		length: Option<i64>,
-		looping: Option<bool>,
-		taken_on_grindr: bool,
-	) -> Result<MediaUploadResponse, GrindrError> {
-		let mut path =
-			format!("/v6/chat/media/upload?takenOnGrindr={taken_on_grindr}");
-		if let Some(length) = length {
-			path.push_str(&format!("&length={length}"));
-		}
-		if let Some(looping) = looping {
-			path.push_str(&format!("&looping={looping}"));
-		}
-		let resp = self
-			.request_signed_bytes(Method::POST, &path, content_type, bytes)
-			.await?;
-		parse_json(resp)
 	}
 
 	/// Fetches a CDN file on the transport the API uses, with the headers the
@@ -813,6 +636,8 @@ impl GrindrClient {
 mod tests {
 	use super::*;
 	use crate::auth::{Credentials, SessionToken};
+	use crate::request::Body;
+	use wreq::header::HeaderValue;
 
 	#[test]
 	fn new_does_not_require_a_runtime() {
@@ -834,26 +659,30 @@ mod tests {
 			},
 		})
 		.unwrap();
-		let raw = RequestBody::Raw {
-			content_type: "image/jpeg".to_owned(),
-			bytes: Bytes::from_static(b"jpeg"),
+		let jpeg = bytes::Bytes::from_static(b"jpeg");
+		let content_type = HeaderValue::from_static("image/jpeg");
+		let raw = Body::Bytes {
+			content_type: content_type.clone(),
+			bytes: jpeg.clone(),
 		};
-		let json = RequestBody::Json(serde_json::json!({}));
-		let timeouts_for = |body: Option<&RequestBody>| {
+		let signed = Body::Signed {
+			content_type,
+			bytes: jpeg,
+		};
+		let json = Body::json(&serde_json::json!({})).unwrap();
+		let timeouts_for = |body: &Body| {
 			let request = client
 				.inner
-				.apply_call_timeouts(
-					Client::new().post("http://localhost/"),
-					body,
-				)
+				.apply_timeouts(Client::new().post("http://localhost/"), body)
 				.build()
 				.unwrap();
 			(request.timeout().copied(), request.read_timeout().copied())
 		};
 
-		assert_eq!(timeouts_for(Some(&raw)), (Some(upload), Some(upload)));
-		assert_eq!(timeouts_for(Some(&json)), (Some(CALL_TIMEOUT), None));
-		assert_eq!(timeouts_for(None), (Some(CALL_TIMEOUT), None));
+		assert_eq!(timeouts_for(&raw), (Some(upload), Some(upload)));
+		assert_eq!(timeouts_for(&signed), (Some(upload), Some(upload)));
+		assert_eq!(timeouts_for(&json), (Some(CALL_TIMEOUT), None));
+		assert_eq!(timeouts_for(&Body::Empty), (Some(CALL_TIMEOUT), None));
 		assert!(Timeouts::default().upload > CALL_TIMEOUT);
 	}
 
@@ -872,21 +701,15 @@ mod tests {
 		let bytes = vec![0u8; 64 * 1024];
 
 		let unsigned = client
-			.request_authenticated_bytes(
-				Method::POST,
-				&slow_upload,
-				"application/octet-stream",
-				bytes.clone(),
-			)
+			.request(Method::POST, &slow_upload)
+			.bytes("application/octet-stream", bytes.clone())
+			.send()
 			.await
 			.unwrap();
 		let signed = client
-			.request_signed_bytes(
-				Method::POST,
-				&slow_upload,
-				"application/octet-stream",
-				bytes,
-			)
+			.request(Method::POST, &slow_upload)
+			.signed_bytes("application/octet-stream", bytes)
+			.send()
 			.await
 			.unwrap();
 
@@ -922,10 +745,7 @@ mod tests {
 		let client = GrindrClient::new(device, Some(session)).unwrap();
 		let path = late_unauthorized(0);
 
-		let resp = client
-			.request_authenticated_raw(Method::GET, &path, None)
-			.await
-			.unwrap();
+		let resp = client.request(Method::GET, &path).send().await.unwrap();
 
 		assert_eq!(resp.status, 401);
 		assert_eq!(attempts_at(&device_id, &path), 2);
@@ -939,7 +759,7 @@ mod tests {
 		let path = late_unauthorized(300);
 
 		let (result, signed_in) = tokio::join!(
-			client.request_authenticated_raw(Method::GET, &path, None),
+			client.request(Method::GET, &path).send(),
 			client.login("b@example.com", "pw"),
 		);
 
@@ -964,12 +784,10 @@ mod tests {
 		let path = late_unauthorized(300);
 
 		let (result, signed_in) = tokio::join!(
-			client.request_signed_bytes(
-				Method::POST,
-				&path,
-				"image/jpeg",
-				vec![0xFF, 0xD8],
-			),
+			client
+				.request(Method::POST, &path)
+				.signed_bytes("image/jpeg", vec![0xFF, 0xD8])
+				.send(),
 			client.login("b@example.com", "pw"),
 		);
 
@@ -981,12 +799,109 @@ mod tests {
 		assert_eq!(attempts_at(&device_id, &path), 1);
 	}
 
+	fn queue_signing_rejections(device_id: &str, path: &str, kinds: &[&str]) {
+		crate::testserver::queue_replies(crate::testserver::QueuedReplies {
+			device_id,
+			path,
+			replies: kinds
+				.iter()
+				.map(|kind| {
+					("400 Bad Request", format!(r#"{{"type":"{kind}"}}"#))
+				})
+				.collect(),
+		});
+	}
+
+	struct SignedClient {
+		client: GrindrClient,
+		device_id: String,
+	}
+
+	async fn signed_client() -> SignedClient {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		let client = GrindrClient::new(device, Some(fake_session())).unwrap();
+		let key = crate::signing::DeviceKey::generate("1".to_owned());
+		assert!(client.restore_signing_key(key.export()).await);
+		SignedClient { client, device_id }
+	}
+
+	impl SignedClient {
+		fn post_signed(&self, path: &str) -> RequestBuilder {
+			self.client
+				.request(Method::POST, path)
+				.signed_bytes("image/jpeg", vec![0xFF, 0xD8])
+		}
+	}
+
+	#[tokio::test]
+	async fn a_clock_rejection_is_re_signed_once_and_keeps_the_key() {
+		let signed = signed_client().await;
+		let path = crate::testserver::ACCEPTING_PATH;
+		queue_signing_rejections(
+			&signed.device_id,
+			path,
+			&["timestamp_drift", "nonce_replayed"],
+		);
+
+		let response = signed.post_signed(path).send().await.unwrap();
+
+		assert_eq!(response.status, 400);
+		let nonces: Vec<_> =
+			crate::testserver::requests_from(&signed.device_id)
+				.iter()
+				.filter(|r| r.path == path)
+				.map(|r| r.header("x-nonce").unwrap().to_owned())
+				.collect();
+		assert_eq!(nonces.len(), 2);
+		assert_ne!(nonces[0], nonces[1]);
+		assert!(signed.client.signing_key_receiver().borrow().is_some());
+	}
+
+	#[tokio::test]
+	async fn any_other_signing_rejection_drops_the_key() {
+		let signed = signed_client().await;
+		let path = crate::testserver::ACCEPTING_PATH;
+		queue_signing_rejections(&signed.device_id, path, &["bad_signature"]);
+
+		let response = signed.post_signed(path).send().await.unwrap();
+
+		assert_eq!(response.status, 400);
+		assert_eq!(attempts_at(&signed.device_id, path), 1);
+		assert!(signed.client.signing_key_receiver().borrow().is_none());
+	}
+
+	#[tokio::test]
+	async fn a_clock_rejection_is_not_re_signed_after_another_account_signs_in()
+	{
+		let signed = signed_client().await;
+		let path = late_unauthorized(300);
+		queue_signing_rejections(
+			&signed.device_id,
+			&path,
+			&["timestamp_drift"],
+		);
+
+		let (result, signed_in) = tokio::join!(
+			signed.post_signed(&path).send(),
+			signed.client.login("b@example.com", "pw"),
+		);
+
+		signed_in.unwrap();
+		assert!(
+			matches!(result, Err(GrindrError::SessionCleared)),
+			"got {result:?}"
+		);
+		assert_eq!(attempts_at(&signed.device_id, &path), 1);
+	}
+
 	#[tokio::test]
 	async fn rest_calls_do_not_start_the_ws_task() {
 		let client = GrindrClient::new(DeviceInfo::generate(), None).unwrap();
 
 		let err = client
-			.request_authenticated_raw(Method::GET, "/v3/me/profile", None)
+			.request(Method::GET, "/v3/me/profile")
+			.send()
 			.await
 			.unwrap_err();
 
@@ -998,16 +913,18 @@ mod tests {
 	async fn a_session_without_a_token_is_never_sent_as_an_empty_bearer() {
 		let device = DeviceInfo::generate();
 		let device_id = device.device_id.clone();
-		crate::testserver::queue_session_replies(
-			&device_id,
-			[("503 Service Unavailable", "{}".to_owned())],
-		);
+		crate::testserver::queue_replies(crate::testserver::QueuedReplies {
+			device_id: &device_id,
+			path: "/v8/sessions",
+			replies: vec![("503 Service Unavailable", "{}".to_owned())],
+		});
 		let client =
 			GrindrClient::new(device, Some(resumed("a@b.c", "auth-tok")))
 				.unwrap();
 
 		let err = client
-			.request_authenticated_raw(Method::GET, "/v3/me/profile", None)
+			.request(Method::GET, "/v3/me/profile")
+			.send()
 			.await
 			.unwrap_err();
 		assert!(matches!(err, GrindrError::Auth(_)), "got {err:?}");
@@ -1024,7 +941,9 @@ mod tests {
 		let client = GrindrClient::new(DeviceInfo::generate(), None).unwrap();
 
 		let err = client
-			.request_no_auth_raw(Method::GET, "evil.com/x", None)
+			.request(Method::GET, "evil.com/x")
+			.unauthenticated()
+			.send()
 			.await
 			.unwrap_err();
 		assert!(matches!(err, GrindrError::InvalidRequest(_)));
@@ -1036,23 +955,17 @@ mod tests {
 		let client = GrindrClient::new(DeviceInfo::generate(), None).unwrap();
 
 		let err = client
-			.request_authenticated_bytes(
-				Method::POST,
-				"/v6/chat/media/upload?takenOnGrindr=false",
-				"image/jpeg",
-				vec![0xFF, 0xD8],
-			)
+			.request(Method::POST, crate::testserver::ACCEPTING_PATH)
+			.bytes("image/jpeg", vec![0xFF, 0xD8])
+			.send()
 			.await
 			.unwrap_err();
 		assert!(matches!(err, GrindrError::Auth(_)));
 
 		let err = client
-			.request_authenticated_bytes(
-				Method::POST,
-				"evil.com/x",
-				"image/jpeg",
-				Vec::new(),
-			)
+			.request(Method::POST, "evil.com/x")
+			.bytes("image/jpeg", Vec::new())
+			.send()
 			.await
 			.unwrap_err();
 		assert!(matches!(err, GrindrError::InvalidRequest(_)));
@@ -1067,7 +980,8 @@ mod tests {
 				.unwrap();
 
 		let resp = client
-			.request_authenticated_raw(Method::GET, "/v3/bootstrap", None)
+			.request(Method::GET, "/v3/bootstrap")
+			.send()
 			.await
 			.unwrap();
 		assert_eq!(resp.status, 200);
@@ -1092,16 +1006,18 @@ mod tests {
 	async fn a_failing_refresh_is_reported_once_then_retracted_on_recovery() {
 		let device = DeviceInfo::generate();
 		let device_id = device.device_id.clone();
-		crate::testserver::queue_session_replies(
-			&device_id,
-			[("503 Service Unavailable", "{}".to_owned())],
-		);
+		crate::testserver::queue_replies(crate::testserver::QueuedReplies {
+			device_id: &device_id,
+			path: "/v8/sessions",
+			replies: vec![("503 Service Unavailable", "{}".to_owned())],
+		});
 		let client =
 			GrindrClient::new(device, Some(expired_session())).unwrap();
 		let mut events = client.auth_event_receiver();
 
 		client
-			.request_authenticated_raw(Method::GET, "/v3/bootstrap", None)
+			.request(Method::GET, "/v3/bootstrap")
+			.send()
 			.await
 			.unwrap();
 
@@ -1119,26 +1035,19 @@ mod tests {
 	async fn a_burst_of_calls_on_a_dead_network_refreshes_once() {
 		let device = DeviceInfo::generate();
 		let device_id = device.device_id.clone();
-		crate::testserver::queue_session_replies(
-			&device_id,
-			std::iter::repeat_n(
-				("503 Service Unavailable", "{}".to_owned()),
-				8,
-			),
-		);
+		crate::testserver::queue_replies(crate::testserver::QueuedReplies {
+			device_id: &device_id,
+			path: "/v8/sessions",
+			replies: vec![("503 Service Unavailable", "{}".to_owned()); 8],
+		});
 		let client =
 			GrindrClient::new(device, Some(expired_session())).unwrap();
 
 		let calls = (0..8).map(|_| {
 			let client = client.clone();
 			async move {
-				let _ = client
-					.request_authenticated_raw(
-						Method::GET,
-						"/v3/bootstrap",
-						None,
-					)
-					.await;
+				let _ =
+					client.request(Method::GET, "/v3/bootstrap").send().await;
 			}
 		});
 		futures_util::future::join_all(calls).await;
@@ -1158,17 +1067,19 @@ mod tests {
 	async fn an_idle_client_reports_nothing_but_still_serves_rest_calls() {
 		let device = DeviceInfo::generate();
 		let device_id = device.device_id.clone();
-		crate::testserver::queue_session_replies(
-			&device_id,
-			[("503 Service Unavailable", "{}".to_owned())],
-		);
+		crate::testserver::queue_replies(crate::testserver::QueuedReplies {
+			device_id: &device_id,
+			path: "/v8/sessions",
+			replies: vec![("503 Service Unavailable", "{}".to_owned())],
+		});
 		let client =
 			GrindrClient::new(device, Some(expired_session())).unwrap();
 		let mut events = client.auth_event_receiver();
 		client.set_active(false);
 
 		client
-			.request_authenticated_raw(Method::GET, "/v3/bootstrap", None)
+			.request(Method::GET, "/v3/bootstrap")
+			.send()
 			.await
 			.unwrap();
 
@@ -1194,28 +1105,26 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn an_unsigned_chat_upload_registers_no_key_and_signs_nothing() {
+	async fn an_unsigned_upload_registers_no_key_and_signs_nothing() {
 		let device = DeviceInfo::generate();
 		let device_id = device.device_id.clone();
 		let client =
 			GrindrClient::new(device, Some(resumed("a@b.c", "stored-tok")))
 				.unwrap();
 
-		let uploaded = client
-			.upload_chat_media_unsigned(vec![0xFF, 0xD8], "image/jpeg")
+		client
+			.request(Method::POST, crate::testserver::ACCEPTING_PATH)
+			.bytes("image/jpeg", vec![0xFF, 0xD8])
+			.send()
 			.await
 			.unwrap();
-
-		assert_eq!(uploaded.media_id, 7);
-		assert_eq!(uploaded.url, "https://cdn/x.jpg");
-		assert_eq!(uploaded.media_hash, "h");
 
 		let requests = crate::testserver::requests_from(&device_id);
 		let paths: Vec<&str> =
 			requests.iter().map(|r| r.path.as_str()).collect();
 		assert_eq!(
 			paths,
-			["/v8/sessions", "/v5/chat/media/upload?takenOnGrindr=false"],
+			["/v8/sessions", crate::testserver::ACCEPTING_PATH],
 			"the unsigned path must not touch the device-key endpoints"
 		);
 
@@ -1241,7 +1150,9 @@ mod tests {
 				.unwrap();
 
 		client
-			.upload_profile_image(vec![0xFF, 0xD8], None, false)
+			.request(Method::POST, crate::testserver::ACCEPTING_PATH)
+			.signed_bytes("image/jpeg", vec![0xFF, 0xD8])
+			.send()
 			.await
 			.unwrap();
 
@@ -1254,7 +1165,7 @@ mod tests {
 				"/v8/sessions",
 				"/v1/verification/device-keys/challenge",
 				"/v1/verification/device-keys",
-				"/v5/media/upload?takenOnGrindr=false",
+				crate::testserver::ACCEPTING_PATH,
 			],
 			"the refresh must land before the key is generated"
 		);
@@ -1332,7 +1243,9 @@ mod tests {
 		let client = GrindrClient::new(device, Some(fake_session())).unwrap();
 
 		let resp = client
-			.request_no_auth_raw(Method::GET, "/v3/bootstrap", None)
+			.request(Method::GET, "/v3/bootstrap")
+			.unauthenticated()
+			.send()
 			.await
 			.unwrap();
 		assert_eq!(resp.status, 200);
@@ -1379,7 +1292,9 @@ mod tests {
 		));
 
 		client
-			.upload_profile_image(vec![0xFF, 0xD8], None, false)
+			.request(Method::POST, crate::testserver::ACCEPTING_PATH)
+			.signed_bytes("image/jpeg", vec![0xFF, 0xD8])
+			.send()
 			.await
 			.unwrap();
 
@@ -1392,7 +1307,7 @@ mod tests {
 				"/v8/sessions",
 				"/v1/verification/device-keys/challenge",
 				"/v2/verification/device-keys",
-				"/v5/media/upload?takenOnGrindr=false",
+				crate::testserver::ACCEPTING_PATH,
 			]
 		);
 

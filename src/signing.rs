@@ -1,10 +1,3 @@
-//! Device-key request signing for media uploads (Grindr 26.10.0+).
-//!
-//! A P-256 key is registered per account for the session and signs each upload.
-//! Both signatures bind to `userId` and the `L-Device-Info` device id, which the
-//! server already receives. The key can be persisted with [`DeviceSigningKey`] so
-//! restarts reuse it instead of re-registering (matching the official app).
-
 use std::fmt;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -115,7 +108,6 @@ impl DeviceKey {
 	}
 }
 
-/// The four `X-*` headers a signed upload request must carry.
 pub(crate) struct UploadSignature {
 	pub key_id: String,
 	pub signature: String,
@@ -123,18 +115,7 @@ pub(crate) struct UploadSignature {
 	pub nonce: String,
 }
 
-/// A persistable device signing key.
-///
-/// Save it (in secure storage) alongside the [`Session`](crate::Session) and
-/// [`DeviceInfo`](crate::DeviceInfo), then restore it with
-/// [`GrindrClient::restore_signing_key`](crate::GrindrClient::restore_signing_key)
-/// so uploads reuse the same server-registered key across restarts. Observe
-/// changes with
-/// [`GrindrClient::signing_key_receiver`](crate::GrindrClient::signing_key_receiver).
-/// It is scoped to one account and device; the client discards it on
-/// [`logout`](crate::GrindrClient::logout) and
-/// [`rotate_device`](crate::GrindrClient::rotate_device). Its [`fmt::Debug`]
-/// redacts the key.
+/// A device signing key for one account and device; `Debug` redacts it.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DeviceSigningKey {
 	key: String,
@@ -172,13 +153,8 @@ pub(crate) struct ChallengeResponse {
 	pub challenge: String,
 }
 
-/// A device-key signature rejection (`type` in the upload error body).
 pub(crate) enum SigningReject {
-	/// `timestamp_drift` or `nonce_replayed` — re-sign with a corrected clock
-	/// offset and fresh nonce, then retry.
 	Retryable,
-	/// Any other signing failure — the registered key is likely stale; drop it
-	/// so the next upload re-registers.
 	Fatal,
 }
 
@@ -196,76 +172,9 @@ pub(crate) fn signing_reject(body: &[u8]) -> Option<SigningReject> {
 	}
 }
 
-const SIGNED_UPLOAD_PATHS: [&str; 2] =
-	["/v5/media/upload", "/v6/chat/media/upload"];
-
-/// Whether an API path must be sent with
-/// [`request_signed_bytes`](crate::GrindrClient::request_signed_bytes) rather
-/// than [`request_authenticated_bytes`](crate::GrindrClient::request_authenticated_bytes).
-///
-/// The query string is ignored, so `/v5/media/upload?takenOnGrindr=true`
-/// answers the same as `/v5/media/upload`.
-pub fn requires_device_signature(path: &str) -> bool {
-	let path = path.split(['?', '#']).next().unwrap_or(path);
-	SIGNED_UPLOAD_PATHS.contains(&path)
-}
-
-/// Response from a signed profile-image upload (`POST /v5/media/upload`).
-#[derive(Debug, Clone, Deserialize)]
-pub struct UploadProfileImageResponse {
-	/// Media hash of the uploaded original.
-	pub hash: String,
-	/// Generated size variants.
-	#[serde(rename = "imageSizes", default)]
-	pub image_sizes: Vec<UploadedProfileImage>,
-}
-
-/// One size variant in an [`UploadProfileImageResponse`].
-#[derive(Debug, Clone, Deserialize)]
-pub struct UploadedProfileImage {
-	/// Media hash of this variant.
-	#[serde(rename = "mediaHash")]
-	pub media_hash: String,
-	/// Full CDN URL.
-	#[serde(rename = "fullUrl")]
-	pub full_url: String,
-	/// Moderation state (`null` until reviewed).
-	#[serde(default)]
-	pub state: Option<String>,
-	/// Whether this is the thumbnail variant.
-	pub thumbnail: bool,
-	/// Pixel size of the longest edge.
-	pub size: i32,
-}
-
-/// Response from a signed chat-media upload (`POST /v6/chat/media/upload`).
-#[derive(Debug, Clone, Deserialize)]
-pub struct MediaUploadResponse {
-	/// Server-assigned media id.
-	#[serde(rename = "mediaId")]
-	pub media_id: i64,
-	/// CDN URL of the uploaded media.
-	pub url: String,
-	/// Media hash.
-	#[serde(rename = "mediaHash")]
-	pub media_hash: String,
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	#[test]
-	fn signature_requirement_covers_upload_paths_with_any_query() {
-		assert!(requires_device_signature("/v5/media/upload"));
-		assert!(requires_device_signature(
-			"/v6/chat/media/upload?takenOnGrindr=true"
-		));
-
-		assert!(!requires_device_signature("/v3/me/profile"));
-		assert!(!requires_device_signature("/v5/media/uploads"));
-		assert!(!requires_device_signature("/v5/media/upload/extra"));
-	}
 
 	#[test]
 	fn key_id_is_sha256_of_public_key() {

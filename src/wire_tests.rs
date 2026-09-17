@@ -93,37 +93,39 @@ async fn every_request_kind_keeps_its_wire_layout() {
 	client.recaptcha_first_party_enabled().await.ok();
 	client.login("a@b.c", "pw").await.unwrap();
 	client
-		.request_no_auth_raw(Method::GET, ACCEPTING_PATH, None)
+		.request(Method::GET, ACCEPTING_PATH)
+		.unauthenticated()
+		.send()
 		.await
 		.unwrap();
 	client
-		.request_no_auth_raw(Method::POST, ACCEPTING_PATH, Some(json.clone()))
+		.request(Method::POST, ACCEPTING_PATH)
+		.unauthenticated()
+		.json(&json)
+		.send()
 		.await
 		.unwrap();
 	client
-		.request_authenticated_raw(Method::GET, ACCEPTING_PATH, None)
+		.request(Method::GET, ACCEPTING_PATH)
+		.send()
 		.await
 		.unwrap();
 	client
-		.request_authenticated_raw(Method::PUT, ACCEPTING_PATH, Some(json))
+		.request(Method::PUT, ACCEPTING_PATH)
+		.json(&json)
+		.send()
 		.await
 		.unwrap();
 	client
-		.request_authenticated_bytes(
-			Method::POST,
-			ACCEPTING_PATH,
-			"image/jpeg",
-			Bytes::from_static(b"bytes"),
-		)
+		.request(Method::POST, ACCEPTING_PATH)
+		.bytes("image/jpeg", Bytes::from_static(b"bytes"))
+		.send()
 		.await
 		.unwrap();
 	client
-		.request_signed_bytes(
-			Method::POST,
-			ACCEPTING_PATH,
-			"image/jpeg",
-			Bytes::from_static(b"signed"),
-		)
+		.request(Method::POST, ACCEPTING_PATH)
+		.signed_bytes("image/jpeg", Bytes::from_static(b"signed"))
+		.send()
 		.await
 		.unwrap();
 

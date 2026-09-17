@@ -38,7 +38,9 @@ fn load_or_create_device(path: &Path) -> DeviceInfo {
 
 async fn print_captcha_assignments(client: &GrindrClient) {
 	let response = client
-		.request_no_auth_raw(Method::GET, "/public/v1/assignments", None)
+		.request(Method::GET, "/public/v1/assignments")
+		.unauthenticated()
+		.send()
 		.await
 		.expect("fetch assignments");
 	let body: serde_json::Value =

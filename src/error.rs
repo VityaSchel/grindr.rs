@@ -151,11 +151,7 @@ impl std::fmt::Display for BanInfo {
 }
 
 impl GrindrError {
-	/// Builds the error for a non-success [`RawResponse`](crate::RawResponse),
-	/// the same way the crate's typed methods do: [`Api`](Self::Api) (or
-	/// [`Unauthorized`](Self::Unauthorized) for a `401`) with the Grindr
-	/// `{code, message}` parsed from the body, falling back to the HTTP status
-	/// and a capped body excerpt — markup is summarized, never quoted.
+	/// Builds the error for a non-success [`RawResponse`](crate::RawResponse).
 	pub fn from_response(status: u16, body: &[u8]) -> Self {
 		crate::rest::parse_api_error(body, status)
 	}

@@ -11,7 +11,9 @@ use crate::auth::{AuthEvent, AuthState, LoginResult, Session, SessionKind};
 use crate::device::DeviceInfo;
 use crate::error::GrindrError;
 use crate::headers::build_user_agent;
-use crate::media::{MediaRequest, MediaResponse};
+use crate::media::{
+	MediaRequest, MediaResponse, MediaStream, StreamRequest, MEDIA_TIMEOUT,
+};
 use crate::request::RequestBuilder;
 use crate::rest::{Fingerprint, InnerClient};
 use crate::signing::DeviceSigningKey;
@@ -155,6 +157,7 @@ pub(crate) struct Timeouts {
 	pub read: Duration,
 	pub upload: Duration,
 	pub stall: Duration,
+	pub media: Duration,
 }
 
 impl Default for Timeouts {
@@ -163,6 +166,7 @@ impl Default for Timeouts {
 			read: Duration::from_secs(30),
 			upload: Duration::from_secs(120),
 			stall: Duration::from_secs(30),
+			media: MEDIA_TIMEOUT,
 		}
 	}
 }
@@ -565,6 +569,19 @@ impl GrindrClient {
 		request: MediaRequest<'_>,
 	) -> Result<MediaResponse, GrindrError> {
 		self.inner.fetch_media(request).await
+	}
+
+	/// Opens a CDN file as a stream on the transport the API uses, with the
+	/// same headers and host rules as [`fetch_media`](Self::fetch_media).
+	///
+	/// The headers must arrive within 20 s; the body has no total deadline,
+	/// only a read timeout between two pieces. A non-success status comes back
+	/// as an ordinary [`MediaStream`].
+	pub async fn stream_media(
+		&self,
+		request: StreamRequest<'_>,
+	) -> Result<MediaStream, GrindrError> {
+		self.inner.stream_media(request).await
 	}
 
 	/// Replaces the device identity and the underlying HTTP/TLS transport while

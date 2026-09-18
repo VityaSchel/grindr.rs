@@ -73,7 +73,9 @@ pub use headers::{
 	build_device_info_header, build_platform_user_agent, build_user_agent,
 	GrindrHeaders, APP_VERSION,
 };
-pub use media::{MediaFetcher, MediaRequest, MediaResponse};
+pub use media::{
+	MediaFetcher, MediaRequest, MediaResponse, MediaStream, StreamRequest,
+};
 pub use request::RequestBuilder;
 pub use rest::RawResponse;
 pub use signing::DeviceSigningKey;

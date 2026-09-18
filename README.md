@@ -154,9 +154,10 @@ Only the initial request carries a `geohash`; automatic background refreshes nev
 
 #### Media downloads
 
-| Method                                               | Description                                                                |
-| ---------------------------------------------------- | -------------------------------------------------------------------------- |
-| `fetch_media(MediaRequest) -> Result<MediaResponse>` | GET a CDN file on the transport the API uses, with the app's image headers |
+| Method                                               | Description                                                                                    |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `fetch_media(MediaRequest) -> Result<MediaResponse>` | GET a CDN file on the transport the API uses, with the app's image headers                     |
+| `stream_media(StreamRequest) -> Result<MediaStream>` | The same GET, handed back once the headers arrive; the body is read piece by piece via `chunk` |
 
 Only `https` on `cdns.grindr.com` or `*.cloudfront.net` is accepted, redirects included; anything else is `GrindrError::InvalidRequest` before a socket is opened. Non-success status returns as `MediaResponse`.
 
@@ -225,6 +226,8 @@ Every request carries its own timeout: 35 s, or 120 s when the body is bytes. A 
 
 - `MediaRequest` — `{ url, range, max_bytes }` for `fetch_media`
 - `MediaResponse` — `{ status, content_type, content_range, accept_ranges, body }`. Size the body using `body.len()`; `Content-Length` is the compressed size and is dropped when decoding
+- `StreamRequest` — `{ url, range, fetcher }` for `stream_media`
+- `MediaStream` — `{ status, content_type, content_length, content_range, accept_ranges }` plus `chunk() -> Result<Option<Bytes>>`, `None` once the body has ended
 
 **Websocket**
 

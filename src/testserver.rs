@@ -174,6 +174,7 @@ fn serve(mut stream: TcpStream) {
 				content_type: "application/json",
 				extra: Vec::new(),
 				body: payload.into_bytes(),
+				pace: None,
 			}
 		}
 	};
@@ -196,8 +197,30 @@ fn serve(mut stream: TcpStream) {
 	}
 	head.push_str("\r\n");
 	let _ = stream.write_all(head.as_bytes());
-	let _ = stream.write_all(&reply.body);
+	write_body(&mut stream, &reply);
 	let _ = stream.flush();
+}
+
+pub(crate) const DRIP_PIECES: usize = 8;
+
+fn write_body(stream: &mut TcpStream, reply: &Reply) {
+	let Some(pause) = reply.pace else {
+		let _ = stream.write_all(&reply.body);
+		return;
+	};
+	let piece = reply.body.len().div_ceil(DRIP_PIECES).max(1);
+	for (index, chunk) in reply.body.chunks(piece).enumerate() {
+		if index > 0 {
+			std::thread::sleep(pause);
+		}
+		if stream
+			.write_all(chunk)
+			.and_then(|()| stream.flush())
+			.is_err()
+		{
+			return;
+		}
+	}
 }
 
 pub(crate) const SLOW_READ_PREFIX: &str = "/slow-read/";
@@ -232,9 +255,11 @@ struct Reply {
 	content_type: &'static str,
 	extra: Vec<(&'static str, String)>,
 	body: Vec<u8>,
+	pace: Option<Duration>,
 }
 
 /// `/media/<len>` serves that many bytes and honors `Range`;
+/// `/media/<len>?drip=<ms>` writes them in [`DRIP_PIECES`] pieces `<ms>` apart;
 /// `/media/redirect?to=<url>` answers a `302`.
 pub(crate) const MEDIA_PREFIX: &str = "/media/";
 
@@ -245,15 +270,16 @@ fn media_reply(rest: &str, headers: &[(String, String)]) -> Reply {
 			content_type: "text/plain",
 			extra: vec![("location", query.to_owned())],
 			body: Vec::new(),
+			pace: None,
 		};
 	}
 
-	let length: usize = rest
-		.split('?')
-		.next()
-		.unwrap_or(rest)
-		.parse()
-		.unwrap_or_default();
+	let (length, query) = rest.split_once('?').unwrap_or((rest, ""));
+	let length: usize = length.parse().unwrap_or_default();
+	let pace = query
+		.strip_prefix("drip=")
+		.and_then(|millis| millis.parse().ok())
+		.map(Duration::from_millis);
 	let full: Vec<u8> = (0..length).map(|i| i as u8).collect();
 
 	let range = headers
@@ -267,6 +293,7 @@ fn media_reply(rest: &str, headers: &[(String, String)]) -> Reply {
 			content_type: "image/jpeg",
 			extra: vec![("accept-ranges", "bytes".to_owned())],
 			body: full,
+			pace,
 		};
 	};
 
@@ -282,6 +309,7 @@ fn media_reply(rest: &str, headers: &[(String, String)]) -> Reply {
 			("content-range", format!("bytes {start}-{end}/{length}")),
 		],
 		body: slice,
+		pace,
 	}
 }
 

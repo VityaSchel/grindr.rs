@@ -14,6 +14,7 @@ license = "MIT"
 keywords = ["grindr", "api", "client"]
 categories = ["api-bindings"]
 exclude = [
+	".forgejo",
 	".gitignore",
 	".vscode",
 	".editorconfig",

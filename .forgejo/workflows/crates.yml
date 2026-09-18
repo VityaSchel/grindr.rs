@@ -3,9 +3,14 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: tag to publish
+        type: string
+        required: true
 
 concurrency:
-  group: grindr-crates-${{ forgejo.ref }}
+  group: grindr-crates-${{ forgejo.event.inputs.tag || forgejo.event.release.tag_name }}
   cancel-in-progress: false
 
 jobs:
@@ -24,6 +29,7 @@ jobs:
           bash --noprofile --norc -e -o pipefail {0}
 
     env:
+      RELEASE_TAG: ${{ forgejo.event.inputs.tag || forgejo.event.release.tag_name }}
       WORKSPACE: /opt/grindr-crates
       CARGO_HOME: /opt/rust/cargo
       RUSTUP_HOME: /opt/rust/rustup
@@ -41,18 +47,20 @@ jobs:
 
       - name: Check out
         run: |
-          : "${WORKSPACE:?}"
+          : "${WORKSPACE:?}" "${RELEASE_TAG:?}"
           rm -rf "$WORKSPACE"
           mkdir -p "$WORKSPACE"
           cd "$WORKSPACE"
 
           git init -q .
           git remote add origin "$FORGEJO_SERVER_URL/$FORGEJO_REPOSITORY.git"
-          git fetch -q --depth 1 origin "$FORGEJO_REF"
+          git fetch -q --depth 1 origin "refs/tags/$RELEASE_TAG"
           git checkout -q FETCH_HEAD
-          [ -z "$FORGEJO_SHA" ] || [ "$(git rev-parse HEAD)" = "$FORGEJO_SHA" ] \
-            || { echo "FATAL: ref moved since the run was queued (want $FORGEJO_SHA, got $(git rev-parse HEAD))"; exit 1; }
-          echo "publishing $FORGEJO_REF at $(git rev-parse HEAD)"
+          if [ "$FORGEJO_REF" = "refs/tags/$RELEASE_TAG" ] && [ -n "$FORGEJO_SHA" ]; then
+            [ "$(git rev-parse HEAD)" = "$FORGEJO_SHA" ] \
+              || { echo "FATAL: tag moved since the run was queued (want $FORGEJO_SHA, got $(git rev-parse HEAD))"; exit 1; }
+          fi
+          echo "publishing $RELEASE_TAG at $(git rev-parse HEAD)"
 
       - name: Install system packages
         run: |
@@ -82,13 +90,9 @@ jobs:
           cd "$WORKSPACE"
           pkgid=$(cargo pkgid --locked)
           version=${pkgid##*[#@]}
-          case "$FORGEJO_REF" in
-            refs/tags/*) tag=${FORGEJO_REF#refs/tags/} ;;
-            *) echo "$FORGEJO_REF is not a tag, publishing $version as is"; exit 0 ;;
-          esac
-          case "${tag#v}" in
-            "$version" | "${version%%+*}") echo "tag $tag matches $version" ;;
-            *) echo "FATAL: tag $tag does not match crate version $version"; exit 1 ;;
+          case "${RELEASE_TAG#v}" in
+            "$version" | "${version%%+*}") echo "tag $RELEASE_TAG matches $version" ;;
+            *) echo "FATAL: tag $RELEASE_TAG does not match crate version $version"; exit 1 ;;
           esac
 
       - name: Format

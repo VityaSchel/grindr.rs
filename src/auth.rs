@@ -13,7 +13,7 @@ use crate::rest::InnerClient;
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum SessionKind {
-	/// Email + password login.
+	/// Email + password sign-in.
 	#[default]
 	Email,
 	/// Google third-party sign-in.
@@ -72,7 +72,7 @@ impl fmt::Debug for SessionToken {
 /// on sign out. [`fmt::Debug`] redacts `auth_token`.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct Credentials {
-	/// Account email (or third-party display id for non-email logins).
+	/// Account email (or third-party display id for non-email sign-ins).
 	pub email: String,
 	/// The account's profile id, known once a session has been minted.
 	#[serde(default)]
@@ -82,7 +82,7 @@ pub struct Credentials {
 	/// How the session was created.
 	#[serde(default)]
 	pub kind: SessionKind,
-	/// Vendor-scoped user id for third-party logins, if any.
+	/// Vendor-scoped user id for third-party sign-ins, if any.
 	#[serde(default)]
 	pub third_party_user_id: Option<String>,
 }
@@ -148,10 +148,10 @@ pub struct BanDetails {
 	pub is_automated: bool,
 }
 
-/// The outcome of a successful login or token refresh.
+/// The outcome of a successful sign-in or session refresh.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
-pub struct LoginResult {
+pub struct SignInResult {
 	/// The authenticated account's profile id.
 	pub profile_id: String,
 	/// Account restriction, if any. A session was still established.
@@ -168,7 +168,7 @@ pub(crate) struct SessionResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct LoginRequest {
+pub(crate) struct EmailSignInRequest {
 	pub email: String,
 	pub password: String,
 	pub token: Option<String>,
@@ -290,7 +290,7 @@ pub(crate) trait AuthRequest: Serialize {
 	fn email(&self) -> &str;
 }
 
-impl AuthRequest for LoginRequest {
+impl AuthRequest for EmailSignInRequest {
 	fn email(&self) -> &str {
 		&self.email
 	}
@@ -340,8 +340,8 @@ impl RefreshFailureKind {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum AuthEvent {
-	/// Session cleared (`401`); log in again.
-	LoggedOut,
+	/// Session cleared (`401`); sign in again.
+	SignedOut,
 	/// The account is banned; session cleared.
 	Banned(BanInfo),
 	/// A refresh failed, the session is kept. Sent at most once per cooldown,
@@ -395,7 +395,7 @@ impl RefreshGate {
 
 pub(crate) struct AuthState {
 	pub session: RwLock<Option<Session>>,
-	pub logout_epoch: AtomicU64,
+	pub sign_out_epoch: AtomicU64,
 	pub refresh_lock: Mutex<()>,
 	pub session_tx: watch::Sender<Option<Session>>,
 	pub auth_event_tx: broadcast::Sender<AuthEvent>,
@@ -412,7 +412,7 @@ impl AuthState {
 		let (active_tx, _) = watch::channel(true);
 		let state = Self {
 			session: RwLock::new(initial),
-			logout_epoch: AtomicU64::new(0),
+			sign_out_epoch: AtomicU64::new(0),
 			refresh_lock: Mutex::new(()),
 			session_tx: tx,
 			auth_event_tx,
@@ -423,7 +423,7 @@ impl AuthState {
 	}
 
 	pub fn epoch(&self) -> u64 {
-		self.logout_epoch.load(Ordering::SeqCst)
+		self.sign_out_epoch.load(Ordering::SeqCst)
 	}
 
 	pub fn is_active(&self) -> bool {
@@ -460,7 +460,7 @@ impl AuthState {
 
 	pub async fn clear_session(&self) {
 		let mut guard = self.session.write().await;
-		self.logout_epoch.fetch_add(1, Ordering::SeqCst);
+		self.sign_out_epoch.fetch_add(1, Ordering::SeqCst);
 		*guard = None;
 		let _ = self.session_tx.send(None);
 		*self.refresh_gate.lock().unwrap() = RefreshGate::default();
@@ -473,7 +473,7 @@ pub(crate) async fn create_session(
 	kind: SessionKind,
 	third_party_user_id: Option<String>,
 	required_device_info: Option<crate::rest::RequiredDeviceInfo>,
-) -> Result<(Session, LoginResult), GrindrError> {
+) -> Result<(Session, SignInResult), GrindrError> {
 	let resp: SessionResponse = inner
 		.request_no_auth(
 			wreq::Method::POST,
@@ -486,7 +486,7 @@ pub(crate) async fn create_session(
 	let claims = decode_session_jwt(&resp.session_id)?;
 	let restriction = restriction_from_claims(&claims);
 
-	let result = LoginResult {
+	let result = SignInResult {
 		profile_id: resp.profile_id.clone(),
 		restriction: restriction.clone(),
 	};
@@ -507,14 +507,14 @@ pub(crate) async fn create_session(
 	Ok((session, result))
 }
 
-pub(crate) async fn login_email(
+pub(crate) async fn sign_in_with_email(
 	inner: &InnerClient,
 	auth: &AuthState,
 	email: &str,
 	password: &str,
 	geohash: Option<&str>,
-) -> Result<LoginResult, GrindrError> {
-	let body = LoginRequest {
+) -> Result<SignInResult, GrindrError> {
+	let body = EmailSignInRequest {
 		email: email.to_owned(),
 		password: password.to_owned(),
 		token: None,
@@ -535,13 +535,13 @@ pub(crate) async fn login_email(
 	Ok(result)
 }
 
-pub(crate) async fn third_party_sign_in(
+pub(crate) async fn sign_in_with_third_party(
 	inner: &InnerClient,
 	auth: &AuthState,
 	kind: SessionKind,
 	provider_access_token: &str,
 	geohash: Option<&str>,
-) -> Result<LoginResult, GrindrError> {
+) -> Result<SignInResult, GrindrError> {
 	let Some(third_party_vendor) = kind.third_party_vendor() else {
 		return Err(GrindrError::Auth(
 			"not a third-party session kind".to_owned(),
@@ -576,11 +576,11 @@ fn session_from_third_party(
 	tp: ThirdPartySession,
 	fallback_email: String,
 	kind: SessionKind,
-) -> Result<(Session, LoginResult), GrindrError> {
+) -> Result<(Session, SignInResult), GrindrError> {
 	let claims = decode_session_jwt(&tp.session_id)?;
 	let restriction = restriction_from_claims(&claims);
 
-	let result = LoginResult {
+	let result = SignInResult {
 		profile_id: tp.profile_id.clone(),
 		restriction: restriction.clone(),
 	};
@@ -608,7 +608,7 @@ async fn refresh_third_party_session(
 	fallback_email: String,
 	geohash: Option<&str>,
 	kind: SessionKind,
-) -> Result<(Session, LoginResult), GrindrError> {
+) -> Result<(Session, SignInResult), GrindrError> {
 	let body = ThirdPartyRefreshRequest {
 		third_party_user_id,
 		auth_token,
@@ -628,16 +628,16 @@ async fn refresh_third_party_session(
 	session_from_third_party(tp, fallback_email, kind)
 }
 
-pub(crate) async fn refresh_token(
+pub(crate) async fn refresh_session(
 	inner: &InnerClient,
 	auth: &AuthState,
 	geohash: Option<&str>,
-) -> Result<LoginResult, GrindrError> {
+) -> Result<SignInResult, GrindrError> {
 	let (kind, email, auth_token, third_party_user_id, epoch) = {
 		let guard = auth.session.read().await;
 		let s = guard
 			.as_ref()
-			.ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))?;
+			.ok_or_else(|| GrindrError::Auth("not signed in".to_owned()))?;
 		(
 			s.credentials.kind.clone(),
 			s.credentials.email.clone(),
@@ -686,7 +686,7 @@ async fn emit_refresh_failure(auth: &AuthState, error: GrindrError) {
 	let event = match error {
 		GrindrError::Unauthorized { .. } => {
 			auth.clear_session().await;
-			AuthEvent::LoggedOut
+			AuthEvent::SignedOut
 		}
 		GrindrError::Banned(info) => {
 			auth.clear_session().await;
@@ -714,7 +714,7 @@ async fn refresh_gated(
 	if auth.refresh_gate.lock().unwrap().blocked() {
 		return false;
 	}
-	match refresh_token(inner, auth, None).await {
+	match refresh_session(inner, auth, None).await {
 		Ok(_) => true,
 		Err(e) => {
 			tracing::warn!("{context} token refresh failed: {e}");
@@ -810,14 +810,14 @@ pub(crate) async fn authorize(
 ) -> Result<Authorization, GrindrError> {
 	const REFRESH_BUFFER_SECS: u64 = 60;
 
-	let not_logged_in = || GrindrError::Auth("not logged in".to_owned());
+	let not_signed_in = || GrindrError::Auth("not signed in".to_owned());
 
 	let expiring = expires_before(
 		auth.session
 			.read()
 			.await
 			.as_ref()
-			.ok_or_else(not_logged_in)?,
+			.ok_or_else(not_signed_in)?,
 		now_unix() + REFRESH_BUFFER_SECS,
 	);
 
@@ -826,7 +826,7 @@ pub(crate) async fn authorize(
 
 		let still_expiring = match auth.session.read().await.as_ref() {
 			Some(s) => expires_before(s, now_unix() + REFRESH_BUFFER_SECS),
-			None => return Err(not_logged_in()),
+			None => return Err(not_signed_in()),
 		};
 
 		if still_expiring {
@@ -835,8 +835,8 @@ pub(crate) async fn authorize(
 	}
 
 	let session = auth.session.read().await;
-	let session = session.as_ref().ok_or_else(not_logged_in)?;
-	let token = session.token.as_ref().ok_or_else(not_logged_in)?;
+	let session = session.as_ref().ok_or_else(not_signed_in)?;
+	let token = session.token.as_ref().ok_or_else(not_signed_in)?;
 	Ok(Authorization {
 		session_id: token.session_id.clone(),
 		profile_id: session.credentials.profile_id.clone(),
@@ -935,14 +935,14 @@ mod tests {
 
 	#[test]
 	fn sign_in_bodies_carry_geohash_when_set() {
-		let login = serde_json::to_value(LoginRequest {
+		let sign_in = serde_json::to_value(EmailSignInRequest {
 			email: "user@example.com".to_owned(),
 			password: "pw".to_owned(),
 			token: None,
 			geohash: Some("9q8yyk8yuv".to_owned()),
 		})
 		.unwrap();
-		assert_eq!(login["geohash"], "9q8yyk8yuv");
+		assert_eq!(sign_in["geohash"], "9q8yyk8yuv");
 
 		let refresh = serde_json::to_value(RefreshRequest {
 			email: "user@example.com".to_owned(),
@@ -964,14 +964,14 @@ mod tests {
 
 	#[test]
 	fn sign_in_bodies_omit_geohash_when_none() {
-		let login = serde_json::to_value(LoginRequest {
+		let sign_in = serde_json::to_value(EmailSignInRequest {
 			email: "user@example.com".to_owned(),
 			password: "pw".to_owned(),
 			token: None,
 			geohash: None,
 		})
 		.unwrap();
-		assert!(login["geohash"].is_null());
+		assert!(sign_in["geohash"].is_null());
 	}
 
 	#[test]
@@ -1071,7 +1071,7 @@ mod tests {
 		.is_transient());
 
 		let session = RefreshFailureKind::classify(&GrindrError::Auth(
-			"not logged in".to_owned(),
+			"not signed in".to_owned(),
 		));
 		assert_eq!(session, RefreshFailureKind::Session);
 		assert!(!session.is_transient());
@@ -1197,7 +1197,7 @@ mod tests {
 		)
 		.await;
 
-		assert!(matches!(events.try_recv(), Ok(AuthEvent::LoggedOut)));
+		assert!(matches!(events.try_recv(), Ok(AuthEvent::SignedOut)));
 		assert!(auth.session.read().await.is_none());
 	}
 

@@ -42,8 +42,8 @@ async fn main() -> Result<(), grindr::GrindrError> {
     let device = DeviceInfo::generate();
     let client = GrindrClient::new(device, None)?;
 
-    let me = client.login("m@example.com", "yourpassword").await?;
-    println!("logged in as profile {}", me.profile_id);
+    let me = client.sign_in_with_email("m@example.com", "yourpassword").await?;
+    println!("signed in as profile {}", me.profile_id);
 
     // URL must start with `/`
     // Session token is added automatically
@@ -116,25 +116,28 @@ All methods are `async` except `new`, `request`, `set_active`, `is_active`, `set
 
 #### Setup and device identity
 
-| Method                                            | Description                                                                            |
-| ------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `new(device, session) -> Result<Self>`            | Create a client, optionally resuming a stored `Session`. Sync, needs no runtime        |
-| `current_device() -> DeviceInfo`                  | The device identity currently in use                                                   |
-| `rotate_device(device) -> Result<DeviceInfo>`     | Swap the device identity and transport, keeping the session; returns the old device    |
-| `sign_out_rotating(device) -> Result<DeviceInfo>` | `logout()` then `rotate_device()`, so the next login can't be correlated with this one |
+| Method                                            | Description                                                                                |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `new(device, session) -> Result<Self>`            | Create a client, optionally resuming a stored `Session`. Sync, needs no runtime            |
+| `current_device() -> DeviceInfo`                  | The device identity currently in use                                                       |
+| `rotate_device(device) -> Result<DeviceInfo>`     | Swap the device identity and transport, keeping the session; returns the old device        |
+| `sign_out_rotating(device) -> Result<DeviceInfo>` | `sign_out()` then `rotate_device()`, so the next sign-in can't be correlated with this one |
 
 #### Authentication
 
-| Method                                                                      | Description                                                     |
-| --------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `login(email, password) -> Result<LoginResult>`                             | Email + password login                                          |
-| `login_with_geohash(email, password, geohash) -> Result<LoginResult>`       | Like `login`, tagging the sign-in with an approximate location  |
-| `google_sign_in(access_token) -> Result<LoginResult>`                       | Google OAuth sign-in                                            |
-| `google_sign_in_with_geohash(access_token, geohash) -> Result<LoginResult>` | Like `google_sign_in`, with a geohash                           |
-| `refresh_token() -> Result<LoginResult>`                                    | Force a token refresh (happens automatically otherwise)         |
-| `refresh_token_with_geohash(geohash) -> Result<LoginResult>`                | Like `refresh_token`, with a geohash                            |
-| `logout()`                                                                  | Clear the session and signing key, and close the websocket      |
-| `recaptcha_first_party_enabled() -> Result<bool>`                           | Whether the server has first-party reCAPTCHA on. No auth needed |
+| Method                                                                                     | Description                                                                                            |
+| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `sign_in_with_email(email, password) -> Result<SignInResult>`                              | Email + password sign-in                                                                               |
+| `sign_in_with_email_at_geohash(email, password, geohash) -> Result<SignInResult>`          | Like `sign_in_with_email`, tagging the sign-in with an approximate location                            |
+| `sign_in_with_google(access_token) -> Result<SignInResult>`                                | Google OAuth sign-in                                                                                   |
+| `sign_in_with_google_at_geohash(access_token, geohash) -> Result<SignInResult>`            | Like `sign_in_with_google`, with a geohash                                                             |
+| `sign_in_with_facebook(access_token) -> Result<SignInResult>`                              | Facebook sign-in                                                                                       |
+| `sign_in_with_facebook_at_geohash(access_token, geohash) -> Result<SignInResult>`          | Like `sign_in_with_facebook`, with a geohash                                                           |
+| `sign_in_with_third_party_at_geohash(kind, access_token, geohash) -> Result<SignInResult>` | Sign in with any third-party provider token; `kind` picks the vendor, `SessionKind::Email` is rejected |
+| `refresh_session() -> Result<SignInResult>`                                                | Force a session refresh (happens automatically otherwise)                                              |
+| `refresh_session_at_geohash(geohash) -> Result<SignInResult>`                              | Like `refresh_session`, with a geohash                                                                 |
+| `sign_out()`                                                                               | Clear the session and signing key, and close the websocket                                             |
+| `recaptcha_first_party_enabled() -> Result<bool>`                                          | Whether the server has first-party reCAPTCHA on. No auth needed                                        |
 
 Only the initial request carries a `geohash`; automatic background refreshes never do.
 
@@ -182,12 +185,12 @@ Signed requests register an ephemeral P-256 device key on first use.
 
 #### Watching session state
 
-| Method                                                    | Description                                                 |
-| --------------------------------------------------------- | ----------------------------------------------------------- |
-| `session_receiver() -> watch::Receiver<Option<Session>>`  | Watch the current session (updates on login/refresh/logout) |
-| `auth_event_receiver() -> broadcast::Receiver<AuthEvent>` | Subscribe to background token refresh failures              |
-| `set_active(bool)` / `is_active() -> bool`                | Follow the host app between foreground and background       |
-| `reset_transport()`                                       | Drop the connection pool, keeping the device and session    |
+| Method                                                    | Description                                                     |
+| --------------------------------------------------------- | --------------------------------------------------------------- |
+| `session_receiver() -> watch::Receiver<Option<Session>>`  | Watch the current session (updates on sign-in/refresh/sign-out) |
+| `auth_event_receiver() -> broadcast::Receiver<AuthEvent>` | Subscribe to background token refresh failures                  |
+| `set_active(bool)` / `is_active() -> bool`                | Follow the host app between foreground and background           |
+| `reset_transport()`                                       | Drop the connection pool, keeping the device and session        |
 
 ### Types
 
@@ -198,8 +201,8 @@ Everything under **Identity and session** and **Requests and errors** — except
 - `DeviceInfo` — device identity, build with `DeviceInfo::generate()` or `DeviceInfo::default()`
 - `Credentials` — the durable half of a session; the serializable part, persist this. `Debug` redacts `auth_token`. Resume with `Session { credentials, token: None }`
 - `Session` — the account's `Credentials` plus the short-lived `SessionToken` once one is minted. `Debug` redacts `session_id`
-- `SessionKind` — `Email` or `Google`
-- `LoginResult` — `{ profile_id, restriction }`, returned by the auth methods
+- `SessionKind` — `Email`, `Google` or `Facebook`
+- `SignInResult` — `{ profile_id, restriction }`, returned by the auth methods
 - `Restriction` — account restriction from the session JWT, the session is still valid: `AgeVerification { region, reason }` / `TimedBan(BanDetails)` / `TrustVendorRejected` / `Other(String)`
 - `VerificationRegion` — `Uk` / `Br` / `Au` / `Other`
 - `BanDetails` — `{ expiry_time, reason, sub_reason, is_automated }`
@@ -213,7 +216,7 @@ Every request carries its own timeout: 35 s, or 120 s when the body is bytes. A 
 - `BlockKind` — `Cloudflare` for Cloudflare block page or "Just a moment..." challenge, `Edge` for anything else
 - `BanInfo` — `{ kind, code, message, reason, sub_reason, automated }`
 - `BanKind` — `Profile` / `Device` / `Network` / `Underage`
-- `AuthEvent` — `LoggedOut` / `Banned(BanInfo)` / `RefreshFailed { message, kind }` / `RefreshRecovered` from background refreshes
+- `AuthEvent` — `SignedOut` / `Banned(BanInfo)` / `RefreshFailed { message, kind }` / `RefreshRecovered` from background refreshes
 - `RefreshFailureKind` — why a refresh failed: `Transport` / `Blocked` / `RateLimited` / `Server` / `Session`, with `is_transient()`
 
 **Request bodies and signing**

@@ -7,7 +7,7 @@ use wreq::{
 	Method, PseudoOrder, SettingsOrder, SslCurve, TlsConfig, TlsVersion,
 };
 
-use crate::auth::{AuthEvent, AuthState, LoginResult, Session, SessionKind};
+use crate::auth::{AuthEvent, AuthState, Session, SessionKind, SignInResult};
 use crate::device::DeviceInfo;
 use crate::error::GrindrError;
 use crate::headers::build_user_agent;
@@ -234,9 +234,10 @@ struct WsSpawn {
 /// An async client for the Grindr API.
 ///
 /// Cheap to [`Clone`] — clones share the connection pool, session, and the
-/// background websocket task. Build one with [`new`](Self::new), log in with
-/// [`login`](Self::login) or [`google_sign_in`](Self::google_sign_in), then make
-/// requests with [`request`](Self::request).
+/// background websocket task. Build one with [`new`](Self::new), sign in with
+/// [`sign_in_with_email`](Self::sign_in_with_email) or
+/// [`sign_in_with_google`](Self::sign_in_with_google), then make requests with
+/// [`request`](Self::request).
 ///
 /// The realtime websocket is opt-in: REST works on its own and never opens a
 /// socket. Call [`connect`](Self::connect) when you want realtime, then read
@@ -263,9 +264,10 @@ impl GrindrClient {
 	/// Creates a client for a [`DeviceInfo`], optionally resuming an account
 	/// from saved [`Credentials`](crate::Credentials).
 	///
-	/// Pass `None` to start logged out, or `Session { credentials, token: None }`
-	/// to resume without logging in again. This is sync and needs no runtime, and
-	/// it never opens the websocket — call [`connect`](Self::connect) for that.
+	/// Pass `None` to start signed out, or `Session { credentials, token: None
+	/// }` to resume without signing in again. This is sync and needs no
+	/// runtime, and it never opens the websocket — call
+	/// [`connect`](Self::connect) for that.
 	pub fn new(
 		device: DeviceInfo,
 		session: Option<Session>,
@@ -346,14 +348,14 @@ impl GrindrClient {
 
 	/// Watches the current [`Session`].
 	///
-	/// It changes on login, refresh, and logout — read it here to persist its
-	/// [`credentials`](crate::Session::credentials) to disk.
+	/// It changes on sign-in, refresh, and sign-out — read it here to persist
+	/// its [`credentials`](crate::Session::credentials) to disk.
 	pub fn session_receiver(&self) -> watch::Receiver<Option<Session>> {
 		self.session_rx.clone()
 	}
 
-	/// Watches the [`DeviceSigningKey`]; it clears on [`logout`](Self::logout)
-	/// and [`rotate_device`](Self::rotate_device).
+	/// Watches the [`DeviceSigningKey`]; it clears on
+	/// [`sign_out`](Self::sign_out) and [`rotate_device`](Self::rotate_device).
 	pub fn signing_key_receiver(
 		&self,
 	) -> watch::Receiver<Option<DeviceSigningKey>> {
@@ -415,26 +417,27 @@ impl GrindrClient {
 		self.ensure_ws_task();
 	}
 
-	/// Logs in with email and password and stores the session.
-	pub async fn login(
+	/// Signs in with email and password and stores the session.
+	pub async fn sign_in_with_email(
 		&self,
 		email: &str,
 		password: &str,
-	) -> Result<LoginResult, GrindrError> {
-		self.login_with_geohash(email, password, None).await
+	) -> Result<SignInResult, GrindrError> {
+		self.sign_in_with_email_at_geohash(email, password, None)
+			.await
 	}
 
-	/// Like [`login`](Self::login), but tags the sign-in request with a
-	/// `geohash` so the server records that approximate location for the new
-	/// session. Only this initial request carries it; later background refreshes
-	/// do not. Pass `None` to omit it.
-	pub async fn login_with_geohash(
+	/// Like [`sign_in_with_email`](Self::sign_in_with_email), but tags the
+	/// sign-in request with a `geohash` so the server records that approximate
+	/// location for the new session. Only this initial request carries it;
+	/// later background refreshes do not. Pass `None` to omit it.
+	pub async fn sign_in_with_email_at_geohash(
 		&self,
 		email: &str,
 		password: &str,
 		geohash: Option<&str>,
-	) -> Result<LoginResult, GrindrError> {
-		crate::auth::login_email(
+	) -> Result<SignInResult, GrindrError> {
+		crate::auth::sign_in_with_email(
 			&self.inner,
 			&self.auth,
 			email,
@@ -445,23 +448,23 @@ impl GrindrClient {
 	}
 
 	/// Signs in with a Google OAuth access token and stores the session.
-	pub async fn google_sign_in(
+	pub async fn sign_in_with_google(
 		&self,
 		google_access_token: &str,
-	) -> Result<LoginResult, GrindrError> {
-		self.google_sign_in_with_geohash(google_access_token, None)
+	) -> Result<SignInResult, GrindrError> {
+		self.sign_in_with_google_at_geohash(google_access_token, None)
 			.await
 	}
 
-	/// Like [`google_sign_in`](Self::google_sign_in), but tags the sign-in
-	/// request with a `geohash`. Only this initial request carries it. Pass
-	/// `None` to omit it.
-	pub async fn google_sign_in_with_geohash(
+	/// Like [`sign_in_with_google`](Self::sign_in_with_google), but tags the
+	/// sign-in request with a `geohash`. Only this initial request carries it.
+	/// Pass `None` to omit it.
+	pub async fn sign_in_with_google_at_geohash(
 		&self,
 		google_access_token: &str,
 		geohash: Option<&str>,
-	) -> Result<LoginResult, GrindrError> {
-		self.third_party_sign_in_with_geohash(
+	) -> Result<SignInResult, GrindrError> {
+		self.sign_in_with_third_party_at_geohash(
 			SessionKind::Google,
 			google_access_token,
 			geohash,
@@ -470,11 +473,11 @@ impl GrindrClient {
 	}
 
 	/// Signs in with a Facebook user access token and stores the session.
-	pub async fn facebook_sign_in(
+	pub async fn sign_in_with_facebook(
 		&self,
 		facebook_access_token: &str,
-	) -> Result<LoginResult, GrindrError> {
-		self.third_party_sign_in_with_geohash(
+	) -> Result<SignInResult, GrindrError> {
+		self.sign_in_with_third_party_at_geohash(
 			SessionKind::Facebook,
 			facebook_access_token,
 			None,
@@ -482,14 +485,14 @@ impl GrindrClient {
 		.await
 	}
 
-	/// Like [`facebook_sign_in`](Self::facebook_sign_in), but tags the sign-in
-	/// request with a `geohash`.
-	pub async fn facebook_sign_in_with_geohash(
+	/// Like [`sign_in_with_facebook`](Self::sign_in_with_facebook), but tags
+	/// the sign-in request with a `geohash`.
+	pub async fn sign_in_with_facebook_at_geohash(
 		&self,
 		facebook_access_token: &str,
 		geohash: Option<&str>,
-	) -> Result<LoginResult, GrindrError> {
-		self.third_party_sign_in_with_geohash(
+	) -> Result<SignInResult, GrindrError> {
+		self.sign_in_with_third_party_at_geohash(
 			SessionKind::Facebook,
 			facebook_access_token,
 			geohash,
@@ -499,13 +502,13 @@ impl GrindrClient {
 
 	/// Signs in with any third-party provider token. `kind` selects the
 	/// `thirdPartyVendor`; [`SessionKind::Email`] is rejected.
-	pub async fn third_party_sign_in_with_geohash(
+	pub async fn sign_in_with_third_party_at_geohash(
 		&self,
 		kind: SessionKind,
 		provider_access_token: &str,
 		geohash: Option<&str>,
-	) -> Result<LoginResult, GrindrError> {
-		crate::auth::third_party_sign_in(
+	) -> Result<SignInResult, GrindrError> {
+		crate::auth::sign_in_with_third_party(
 			&self.inner,
 			&self.auth,
 			kind,
@@ -515,29 +518,29 @@ impl GrindrClient {
 		.await
 	}
 
-	/// Forces a token refresh.
+	/// Forces a session refresh.
 	///
 	/// This happens automatically before the token expires, so you rarely need
 	/// to call it yourself.
-	pub async fn refresh_token(&self) -> Result<LoginResult, GrindrError> {
-		self.refresh_token_with_geohash(None).await
+	pub async fn refresh_session(&self) -> Result<SignInResult, GrindrError> {
+		self.refresh_session_at_geohash(None).await
 	}
 
-	/// Like [`refresh_token`](Self::refresh_token), but tags the refresh request
-	/// with a `geohash`. Useful to seed the location of a session resumed from a
-	/// saved `auth_token` on its first request. Automatic background refreshes
-	/// never carry a geohash. Pass `None` to omit it.
-	pub async fn refresh_token_with_geohash(
+	/// Like [`refresh_session`](Self::refresh_session), but tags the refresh
+	/// request with a `geohash`. Useful to seed the location of a session
+	/// resumed from a saved `auth_token` on its first request. Automatic
+	/// background refreshes never carry a geohash. Pass `None` to omit it.
+	pub async fn refresh_session_at_geohash(
 		&self,
 		geohash: Option<&str>,
-	) -> Result<LoginResult, GrindrError> {
-		crate::auth::refresh_token(&self.inner, &self.auth, geohash).await
+	) -> Result<SignInResult, GrindrError> {
+		crate::auth::refresh_session(&self.inner, &self.auth, geohash).await
 	}
 
 	/// Clears the session and closes the websocket, without reconnecting while
-	/// logged out. Keeps the device identity and transport — use
+	/// signed out. Keeps the device identity and transport — use
 	/// [`sign_out_rotating`](Self::sign_out_rotating) to also rotate those.
-	pub async fn logout(&self) {
+	pub async fn sign_out(&self) {
 		self.auth.clear_session().await;
 		self.inner.clear_signing().await;
 	}
@@ -601,16 +604,16 @@ impl GrindrClient {
 		Ok(old_fp.device.clone())
 	}
 
-	/// [`logout`](Self::logout) then [`rotate_device`](Self::rotate_device):
-	/// clears the session and rotates the device identity and transport so the
-	/// next login cannot be correlated with this one. Pass a fresh
-	/// [`DeviceInfo`] to persist and reuse until the next sign-out; returns the
-	/// old device.
+	/// [`sign_out`](Self::sign_out) then
+	/// [`rotate_device`](Self::rotate_device): clears the session and rotates
+	/// the device identity and transport so the next sign-in cannot be
+	/// correlated with this one. Pass a fresh [`DeviceInfo`] to persist and
+	/// reuse until the next sign-out; returns the old device.
 	pub async fn sign_out_rotating(
 		&self,
 		device: DeviceInfo,
 	) -> Result<DeviceInfo, GrindrError> {
-		self.logout().await;
+		self.sign_out().await;
 		self.rotate_device(device).await
 	}
 
@@ -642,7 +645,7 @@ impl GrindrClient {
 	}
 
 	/// Reports whether the server's assignments enable first-party reCAPTCHA
-	/// (`recaptcha_first_party`), which selects the `v9` over the `v8` login
+	/// (`recaptcha_first_party`), which selects the `v9` over the `v8` sign-in
 	/// session endpoint.
 	pub async fn recaptcha_first_party_enabled(
 		&self,
@@ -792,7 +795,7 @@ mod tests {
 
 		let (result, signed_in) = tokio::join!(
 			client.request(Method::GET, &path).send(),
-			client.login("b@example.com", "pw"),
+			client.sign_in_with_email("b@example.com", "pw"),
 		);
 
 		assert_eq!(
@@ -820,7 +823,7 @@ mod tests {
 				.request(Method::POST, &path)
 				.signed_bytes("image/jpeg", vec![0xFF, 0xD8])
 				.send(),
-			client.login("b@example.com", "pw"),
+			client.sign_in_with_email("b@example.com", "pw"),
 		);
 
 		signed_in.unwrap();
@@ -916,7 +919,7 @@ mod tests {
 
 		let (result, signed_in) = tokio::join!(
 			signed.post_signed(&path).send(),
-			signed.client.login("b@example.com", "pw"),
+			signed.client.sign_in_with_email("b@example.com", "pw"),
 		);
 
 		signed_in.unwrap();
@@ -1059,7 +1062,7 @@ mod tests {
 		};
 		assert_eq!(kind, crate::auth::RefreshFailureKind::Server);
 
-		client.refresh_token().await.unwrap();
+		client.refresh_session().await.unwrap();
 		assert!(matches!(events.try_recv(), Ok(AuthEvent::RefreshRecovered)));
 	}
 

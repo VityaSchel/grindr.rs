@@ -260,7 +260,7 @@ async fn session_user_id(
 		.await
 		.as_ref()
 		.map(|s| s.credentials.profile_id.clone())
-		.ok_or_else(|| GrindrError::Auth("not logged in".to_owned()))
+		.ok_or_else(|| GrindrError::Auth("not signed in".to_owned()))
 }
 
 const MAX_ERROR_BODY: usize = 256;
@@ -859,7 +859,7 @@ mod tests {
 		let device = DeviceInfo::generate();
 		let device_id = device.device_id.clone();
 		let client = GrindrClient::new(device, None).unwrap();
-		client.login("a@b.c", "pw").await.unwrap();
+		client.sign_in_with_email("a@b.c", "pw").await.unwrap();
 
 		let sign_in = crate::testserver::requests_from(&device_id)
 			.into_iter()
@@ -914,7 +914,7 @@ mod tests {
 		let device = DeviceInfo::generate();
 		let device_id = device.device_id.clone();
 		let client = GrindrClient::new(device, None).unwrap();
-		client.login("a@b.c", "pw").await.unwrap();
+		client.sign_in_with_email("a@b.c", "pw").await.unwrap();
 
 		let sign_in = crate::testserver::requests_from(&device_id)
 			.into_iter()

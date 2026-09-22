@@ -84,8 +84,11 @@ async fn main() {
 	let client = GrindrClient::new(device, None).expect("build client");
 	print_captcha_assignments(&client).await;
 
-	let login = client.login(&email, &password).await.expect("log in");
-	println!("logged in profile_id={:?}", login.profile_id);
+	let sign_in = client
+		.sign_in_with_email(&email, &password)
+		.await
+		.expect("sign in");
+	println!("signed in profile_id={:?}", sign_in.profile_id);
 
 	let path = match captcha_token {
 		Some(token) => {

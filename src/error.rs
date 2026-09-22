@@ -35,7 +35,7 @@ pub enum GrindrError {
 	#[error("could not connect: {0}")]
 	Connect(String),
 
-	/// Authentication problem that is not a server `401` (e.g. not logged in,
+	/// Authentication problem that is not a server `401` (e.g. not signed in,
 	/// JWT could not be decoded, or a third-party account is not registered).
 	#[error("auth error: {0}")]
 	Auth(String),
@@ -60,8 +60,8 @@ pub enum GrindrError {
 		message: String,
 	},
 
-	/// Login or refresh was refused because the account, device, or network is
-	/// banned.
+	/// Sign-in or refresh was refused because the account, device, or network
+	/// is banned.
 	#[error("banned: {0}")]
 	Banned(BanInfo),
 
@@ -126,7 +126,7 @@ impl BanKind {
 	}
 }
 
-/// Details of a ban from the login/refresh response body.
+/// Details of a ban from the sign-in/refresh response body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct BanInfo {

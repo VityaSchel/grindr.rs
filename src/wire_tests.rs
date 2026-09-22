@@ -91,7 +91,7 @@ async fn every_request_kind_keeps_its_wire_layout() {
 	let json = serde_json::json!({ "zeta": 1, "alpha": [2, 3] });
 
 	client.recaptcha_first_party_enabled().await.ok();
-	client.login("a@b.c", "pw").await.unwrap();
+	client.sign_in_with_email("a@b.c", "pw").await.unwrap();
 	client
 		.request(Method::GET, ACCEPTING_PATH)
 		.unauthenticated()
@@ -133,7 +133,10 @@ async fn every_request_kind_keeps_its_wire_layout() {
 	let captcha_device_id = captcha_device.device_id.clone();
 	let captcha_client = GrindrClient::new(captcha_device, None).unwrap();
 	captcha_client.set_captcha_provider(Arc::new(FixedCaptcha));
-	captcha_client.login("a@b.c", "pw").await.unwrap();
+	captcha_client
+		.sign_in_with_email("a@b.c", "pw")
+		.await
+		.unwrap();
 	captcha_client.register_device_key().await.unwrap();
 
 	let mut requests = testserver::requests_from(&device_id);

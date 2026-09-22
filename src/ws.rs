@@ -62,7 +62,7 @@ pub struct WsEvent {
 /// Whether the websocket is connected.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum WsConnectionState {
-	/// Not connected (logged out, reconnecting, or backing off).
+	/// Not connected (signed out, reconnecting, or backing off).
 	#[default]
 	Disconnected,
 	/// Connected and ready to send and receive.
@@ -144,7 +144,7 @@ pub(crate) fn spawn_ws_task(
 					backoff = Duration::from_secs(1);
 				}
 				Err(GrindrError::Auth(_)) => {
-					tracing::warn!("[ws] auth error, waiting for next login");
+					tracing::warn!("[ws] auth error, waiting for next sign-in");
 					let _ =
 						channels.state_tx.send(WsConnectionState::Disconnected);
 					// A backing-off refresh fails without touching the network,
@@ -273,8 +273,8 @@ async fn run_message_loop(
 					.map_err(|e| GrindrError::Http(e.to_string()))?;
 			}
 			changed = session_rx.changed() => {
-				let logged_out = changed.is_err() || session_rx.borrow_and_update().is_none();
-				if logged_out {
+				let signed_out = changed.is_err() || session_rx.borrow_and_update().is_none();
+				if signed_out {
 					return Ok(());
 				}
 			}

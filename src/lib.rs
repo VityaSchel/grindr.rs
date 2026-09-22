@@ -3,7 +3,7 @@
 //!
 //! It talks to Grindr the same way the official Android app does: same TLS and
 //! HTTP/2 fingerprint, same header order, same device identity. On top of that
-//! it handles login, token refresh, requests, and the realtime websocket.
+//! it handles sign-in, session refresh, requests, and the realtime websocket.
 //!
 //! It's only a transport — it doesn't ship types for individual endpoints. You
 //! pick the path and deserialize the response body yourself.
@@ -27,7 +27,7 @@
 //! // Make a device identity once, save it, and reuse it next time.
 //! let client = GrindrClient::new(DeviceInfo::generate(), None)?;
 //!
-//! client.login("user@example.com", "hunter2").await?;
+//! client.sign_in_with_email("user@example.com", "hunter2").await?;
 //!
 //! // Make a request — the session token is added for you.
 //! let resp = client.request(Method::GET, "/v3/me/profile").send().await?;
@@ -62,8 +62,8 @@ mod wire_tests;
 mod ws;
 
 pub use auth::{
-	AuthEvent, BanDetails, Credentials, LoginResult, RefreshFailureKind,
-	Restriction, Session, SessionKind, SessionToken, VerificationRegion,
+	AuthEvent, BanDetails, Credentials, RefreshFailureKind, Restriction,
+	Session, SessionKind, SessionToken, SignInResult, VerificationRegion,
 };
 pub use captcha::{CaptchaAction, CaptchaTokenProvider};
 pub use client::{probe_emulation, GrindrClient};

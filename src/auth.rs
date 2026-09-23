@@ -173,6 +173,8 @@ pub(crate) struct EmailSignInRequest {
 	pub password: String,
 	pub token: Option<String>,
 	pub geohash: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub captcha_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -469,6 +471,7 @@ impl AuthState {
 
 pub(crate) async fn create_session(
 	inner: &InnerClient,
+	path: &str,
 	body: &impl AuthRequest,
 	kind: SessionKind,
 	third_party_user_id: Option<String>,
@@ -477,7 +480,7 @@ pub(crate) async fn create_session(
 	let resp: SessionResponse = inner
 		.request_no_auth(
 			wreq::Method::POST,
-			"/v8/sessions",
+			path,
 			Some(body),
 			required_device_info,
 		)
@@ -513,16 +516,24 @@ pub(crate) async fn sign_in_with_email(
 	email: &str,
 	password: &str,
 	geohash: Option<&str>,
+	captcha_token: Option<&str>,
 ) -> Result<SignInResult, GrindrError> {
+	let path = if captcha_token.is_some() {
+		"/v9/sessions"
+	} else {
+		"/v8/sessions"
+	};
 	let body = EmailSignInRequest {
 		email: email.to_owned(),
 		password: password.to_owned(),
 		token: None,
 		geohash: geohash.map(str::to_owned),
+		captcha_token: captcha_token.map(str::to_owned),
 	};
 	let epoch = auth.epoch();
 	let (session, result) = create_session(
 		inner,
+		path,
 		&body,
 		SessionKind::Email,
 		None,
@@ -655,7 +666,15 @@ pub(crate) async fn refresh_session(
 				token: None,
 				geohash: geohash.map(str::to_owned),
 			};
-			create_session(inner, &body, SessionKind::Email, None, None).await?
+			create_session(
+				inner,
+				"/v8/sessions",
+				&body,
+				SessionKind::Email,
+				None,
+				None,
+			)
+			.await?
 		}
 		kind @ (SessionKind::Google | SessionKind::Facebook) => {
 			let third_party_user_id = third_party_user_id.ok_or_else(|| {
@@ -940,6 +959,7 @@ mod tests {
 			password: "pw".to_owned(),
 			token: None,
 			geohash: Some("9q8yyk8yuv".to_owned()),
+			captcha_token: None,
 		})
 		.unwrap();
 		assert_eq!(sign_in["geohash"], "9q8yyk8yuv");
@@ -969,9 +989,33 @@ mod tests {
 			password: "pw".to_owned(),
 			token: None,
 			geohash: None,
+			captcha_token: None,
 		})
 		.unwrap();
 		assert!(sign_in["geohash"].is_null());
+	}
+
+	#[test]
+	fn a_captcha_token_serializes_camel_cased_and_is_omitted_when_absent() {
+		let with_token = serde_json::to_value(EmailSignInRequest {
+			email: "user@example.com".to_owned(),
+			password: "pw".to_owned(),
+			token: None,
+			geohash: None,
+			captcha_token: Some("tok".to_owned()),
+		})
+		.unwrap();
+		assert_eq!(with_token["captchaToken"], "tok");
+
+		let without_token = serde_json::to_value(EmailSignInRequest {
+			email: "user@example.com".to_owned(),
+			password: "pw".to_owned(),
+			token: None,
+			geohash: None,
+			captcha_token: None,
+		})
+		.unwrap();
+		assert!(without_token.get("captchaToken").is_none());
 	}
 
 	#[test]

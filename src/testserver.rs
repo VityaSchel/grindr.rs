@@ -385,7 +385,7 @@ fn respond(path: &str, headers: &[(String, String)]) -> (&'static str, String) {
 			("200 OK", "{}".to_owned())
 		}
 		ACCEPTING_PATH => ("200 OK", "{}".to_owned()),
-		"/v8/sessions" => (
+		"/v8/sessions" | "/v9/sessions" => (
 			"200 OK",
 			format!(
 				r#"{{"profileId":"{REFRESHED_PROFILE_ID}","sessionId":"{JWT}","authToken":"refreshed-tok"}}"#

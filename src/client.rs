@@ -443,6 +443,26 @@ impl GrindrClient {
 			email,
 			password,
 			geohash,
+			None,
+		)
+		.await
+	}
+
+	/// Signs in with email and password plus a reCAPTCHA token, storing the
+	/// session.
+	pub async fn sign_in_with_email_captcha(
+		&self,
+		email: &str,
+		password: &str,
+		captcha_token: &str,
+	) -> Result<SignInResult, GrindrError> {
+		crate::auth::sign_in_with_email(
+			&self.inner,
+			&self.auth,
+			email,
+			password,
+			None,
+			Some(captcha_token),
 		)
 		.await
 	}
@@ -832,6 +852,50 @@ mod tests {
 			"got {result:?}"
 		);
 		assert_eq!(attempts_at(&device_id, &path), 1);
+	}
+
+	#[tokio::test]
+	async fn signing_in_with_a_captcha_token_posts_it_to_the_v9_endpoint() {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		let client = GrindrClient::new(device, None).unwrap();
+
+		client
+			.sign_in_with_email_captcha("a@b.c", "pw", "captcha-tok")
+			.await
+			.unwrap();
+
+		let requests = crate::testserver::requests_from(&device_id);
+		let sign_in = requests
+			.iter()
+			.find(|r| r.path == "/v9/sessions")
+			.expect("expected a v9 sign-in request");
+		let body: serde_json::Value =
+			serde_json::from_str(&sign_in.body).unwrap();
+		assert_eq!(body["captchaToken"], "captcha-tok");
+		assert!(
+			!requests.iter().any(|r| r.path == "/v8/sessions"),
+			"the captcha sign-in must not touch the plain endpoint"
+		);
+	}
+
+	#[tokio::test]
+	async fn signing_in_without_a_captcha_token_stays_on_the_plain_endpoint() {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		let client = GrindrClient::new(device, None).unwrap();
+
+		client.sign_in_with_email("a@b.c", "pw").await.unwrap();
+
+		let requests = crate::testserver::requests_from(&device_id);
+		let sign_in = requests
+			.iter()
+			.find(|r| r.path == "/v8/sessions")
+			.expect("expected a v8 sign-in request");
+		assert!(
+			!sign_in.body.contains("captchaToken"),
+			"the plain sign-in must not carry a captcha token"
+		);
 	}
 
 	fn queue_signing_rejections(device_id: &str, path: &str, kinds: &[&str]) {

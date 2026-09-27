@@ -15,8 +15,8 @@ concurrency:
 
 jobs:
   publish:
-    runs-on: ["debian", "4c8g", "hetzner"]
-    timeout-minutes: 45
+    runs-on: ["toolchain", "4c8g", "hetzner"]
+    timeout-minutes: 20
 
     defaults:
       run:
@@ -35,8 +35,6 @@ jobs:
       RUSTUP_HOME: /opt/rust/rustup
       CARGO_TERM_COLOR: never
       CARGO_TERM_PROGRESS_WHEN: never
-      RUSTUP_VERSION: "1.29.0"
-      RUSTUP_SHA256: "4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10"
       RUST_VERSION: "1.95.0"
 
     steps:
@@ -62,28 +60,15 @@ jobs:
           fi
           echo "publishing $RELEASE_TAG at $(git rev-parse HEAD)"
 
-      - name: Install system packages
+      - name: Use the baked toolchain
         run: |
-          missing=()
-          for pkg in gcc g++ libc6-dev make cmake libclang-dev; do
-            dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'ok installed' || missing+=("$pkg")
-          done
-          if [ ${#missing[@]} -gt 0 ]; then
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get update -y
-            apt-get install -y --no-install-recommends "${missing[@]}"
-          fi
-
-      - name: Install the pinned toolchain
-        run: |
-          curl -fsSLo /tmp/rustup-init \
-            "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init"
-          echo "${RUSTUP_SHA256}  /tmp/rustup-init" | sha256sum -c -
-          chmod +x /tmp/rustup-init
-          /tmp/rustup-init -q -y --no-modify-path --profile minimal \
-            --default-toolchain "$RUST_VERSION" --component clippy,rustfmt
+          baked=$(cat /opt/rust/toolchain)
+          [ "$baked" = "$RUST_VERSION" ] \
+            || { echo "FATAL: the toolchain image has Rust $baked but RUST_VERSION is $RUST_VERSION — align it with RUST_VERSION in open-grind ci/check-image.sh"; exit 1; }
           echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
           "$CARGO_HOME/bin/cargo" --version
+          "$CARGO_HOME/bin/cargo" fmt --version
+          "$CARGO_HOME/bin/cargo" clippy --version
 
       - name: Match the tag to the crate version
         run: |

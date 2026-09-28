@@ -8,13 +8,18 @@ use crate::error::GrindrError;
 use crate::headers::GrindrHeaders;
 use crate::rest::InnerClient;
 
+#[cfg(test)]
+mod deadline_tests;
 mod stream;
 #[cfg(test)]
 mod tests;
 
+use stream::UNANSWERED;
 pub use stream::{MediaStream, StreamRequest};
 
 pub(crate) const MEDIA_TIMEOUT: Duration = Duration::from_secs(20);
+pub(crate) const MEDIA_BODY_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const UNFINISHED: &str = "the media body did not finish in time";
 const MAX_REDIRECTS: usize = 5;
 
 /// Which of the app's two HTTP stacks a fetch imitates.
@@ -136,16 +141,18 @@ impl InnerClient {
 		&self,
 		request: MediaRequest<'_>,
 	) -> Result<MediaResponse, GrindrError> {
-		let mut response = self
+		let sending = self
 			.media_request(Target {
 				url: request.url,
 				range: request.range,
 				fetcher: request.fetcher,
 			})
 			.await?
-			.timeout(self.timeouts.media)
-			.send()
-			.await?;
+			.read_timeout(self.timeouts.read)
+			.send();
+		let mut response = tokio::time::timeout(self.timeouts.media, sending)
+			.await
+			.map_err(|_| GrindrError::Http(UNANSWERED.to_owned()))??;
 
 		let status = response.status().as_u16();
 		let content_type = header(&response, "content-type");
@@ -161,22 +168,33 @@ impl InnerClient {
 			});
 		}
 
-		let mut body = BytesMut::new();
-		while let Some(chunk) = response.chunk().await? {
-			if body.len() + chunk.len() > request.max_bytes {
-				return Err(GrindrError::MediaTooLarge {
-					max_bytes: request.max_bytes,
-				});
-			}
-			body.put(chunk);
-		}
+		let body = tokio::time::timeout(
+			self.timeouts.media_body,
+			read_body(&mut response, request.max_bytes),
+		)
+		.await
+		.map_err(|_| GrindrError::Http(UNFINISHED.to_owned()))??;
 
 		Ok(MediaResponse {
 			status,
 			content_type,
 			content_range,
 			accept_ranges,
-			body: body.freeze(),
+			body,
 		})
 	}
+}
+
+async fn read_body(
+	response: &mut wreq::Response,
+	max_bytes: usize,
+) -> Result<Bytes, GrindrError> {
+	let mut body = BytesMut::new();
+	while let Some(chunk) = response.chunk().await? {
+		if body.len() + chunk.len() > max_bytes {
+			return Err(GrindrError::MediaTooLarge { max_bytes });
+		}
+		body.put(chunk);
+	}
+	Ok(body.freeze())
 }

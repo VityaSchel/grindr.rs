@@ -1,9 +1,9 @@
 use std::time::{Duration, Instant};
 
-use super::tests::{counting, drain, dripping, request};
+use super::tests::{drain, request};
 use super::UNANSWERED;
 use crate::client::Timeouts;
-use crate::media::tests::client_with;
+use crate::media::tests::{client_with, counting, dripping};
 use crate::testserver::{self, HOLD_BEFORE_CLOSING, STALLED_PATH};
 use crate::GrindrError;
 

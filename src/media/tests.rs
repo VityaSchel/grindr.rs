@@ -40,7 +40,15 @@ pub(super) fn media_url(length: usize) -> String {
 	format!("{}{MEDIA_PREFIX}{length}", testserver::base_url())
 }
 
-fn request(url: &str) -> MediaRequest<'_> {
+pub(super) fn dripping(length: usize, pause: Duration) -> String {
+	format!("{}?drip={}", media_url(length), pause.as_millis())
+}
+
+pub(super) fn counting(length: u8) -> Vec<u8> {
+	(0..length).collect()
+}
+
+pub(super) fn request(url: &str) -> MediaRequest<'_> {
 	MediaRequest {
 		url,
 		range: None,

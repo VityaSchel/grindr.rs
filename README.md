@@ -209,8 +209,6 @@ Everything under **Identity and session** and **Requests and errors** — except
 
 **Requests and errors**
 
-Every request carries its own timeout: 35 s, or 120 s when the body is bytes. A streamed body has a stall timeout instead.
-
 - `RawResponse` — `{ status: u16, body: Vec<u8> }`
 - `GrindrError` — the crate error type (`Http`, `Auth`, `Api`, `Unauthorized`, `Banned`, `RateLimited`, `Blocked(BlockKind)`, `InvalidRequest`, `SessionCleared`, `MediaTooLarge { max_bytes }`); `GrindrError::from_response(status, body)` maps a non-success `RawResponse`
 - `BlockKind` — `Cloudflare` for Cloudflare block page or "Just a moment..." challenge, `Edge` for anything else
@@ -224,6 +222,14 @@ Every request carries its own timeout: 35 s, or 120 s when the body is bytes. A 
 - `RequestBuilder` — built by `request`, sent by `send`
 - `BodySource` — trait with `size()` and `open()`, opened again for every attempt
 - `DeviceSigningKey` — persistable P-256 device signing key, scoped to one account and device. `Debug` redacts the key
+
+**Timeouts:**
+
+- Most requests: 35 s
+- Requests with bytes body: 120 s
+- Requests with streamed body: stall timeout
+- Media fetches: 20 s for the response headers and 30 s between body chunks
+- `fetch_media` times out after 120 s on body
 
 **Downloads**
 

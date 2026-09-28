@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use super::StreamRequest;
-use crate::media::tests::{media_url, signed_in_client};
+use crate::media::tests::{counting, dripping, media_url, signed_in_client};
 use crate::media::{MediaFetcher, MediaRequest, MediaStream};
 use crate::testserver::{self, DRIP_PIECES, MEDIA_PREFIX};
 use crate::GrindrError;
@@ -14,10 +14,6 @@ pub(super) fn request(url: &str) -> StreamRequest<'_> {
 	}
 }
 
-pub(super) fn dripping(length: usize, pause: Duration) -> String {
-	format!("{}?drip={}", media_url(length), pause.as_millis())
-}
-
 pub(super) async fn drain(
 	stream: &mut MediaStream,
 ) -> Result<Vec<u8>, GrindrError> {
@@ -26,10 +22,6 @@ pub(super) async fn drain(
 		body.extend_from_slice(&chunk);
 	}
 	Ok(body)
-}
-
-pub(super) fn counting(length: u8) -> Vec<u8> {
-	(0..length).collect()
 }
 
 #[tokio::test]

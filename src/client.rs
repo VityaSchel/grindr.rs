@@ -12,7 +12,8 @@ use crate::device::DeviceInfo;
 use crate::error::GrindrError;
 use crate::headers::build_user_agent;
 use crate::media::{
-	MediaRequest, MediaResponse, MediaStream, StreamRequest, MEDIA_TIMEOUT,
+	MediaRequest, MediaResponse, MediaStream, StreamRequest,
+	MEDIA_BODY_TIMEOUT, MEDIA_TIMEOUT,
 };
 use crate::request::RequestBuilder;
 use crate::rest::{Fingerprint, InnerClient};
@@ -158,6 +159,7 @@ pub(crate) struct Timeouts {
 	pub upload: Duration,
 	pub stall: Duration,
 	pub media: Duration,
+	pub media_body: Duration,
 }
 
 impl Default for Timeouts {
@@ -167,6 +169,7 @@ impl Default for Timeouts {
 			upload: Duration::from_secs(120),
 			stall: Duration::from_secs(30),
 			media: MEDIA_TIMEOUT,
+			media_body: MEDIA_BODY_TIMEOUT,
 		}
 	}
 }
@@ -585,8 +588,9 @@ impl GrindrClient {
 	///
 	/// Only `https` on `cdns.grindr.com` or `*.cloudfront.net` is accepted,
 	/// redirects included; anything else is [`GrindrError::InvalidRequest`]
-	/// before a socket is opened. A non-success status comes back as an
-	/// ordinary [`MediaResponse`].
+	/// before a socket is opened. The headers must arrive within 20 s and the
+	/// body within 120 s, with a read timeout between two pieces. A
+	/// non-success status comes back as an ordinary [`MediaResponse`].
 	pub async fn fetch_media(
 		&self,
 		request: MediaRequest<'_>,

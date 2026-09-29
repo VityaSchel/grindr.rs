@@ -1,15 +1,13 @@
 use bytes::Bytes;
 
 use super::{header, MediaFetcher, Target};
-use crate::error::GrindrError;
+use crate::error::{GrindrError, TimeoutPhase};
 use crate::rest::InnerClient;
 
 #[cfg(test)]
 mod deadline_tests;
 #[cfg(test)]
 mod tests;
-
-pub(crate) const UNANSWERED: &str = "no response to the media request";
 
 /// Argument of [`GrindrClient::stream_media`](crate::GrindrClient::stream_media).
 #[derive(Debug, Clone, Copy)]
@@ -62,7 +60,7 @@ impl InnerClient {
 			.send();
 		let response = tokio::time::timeout(self.timeouts.media, sending)
 			.await
-			.map_err(|_| GrindrError::Http(UNANSWERED.to_owned()))??;
+			.map_err(|_| GrindrError::Timeout(TimeoutPhase::Headers))??;
 		Ok(MediaStream {
 			status: response.status().as_u16(),
 			content_type: header(&response, "content-type"),

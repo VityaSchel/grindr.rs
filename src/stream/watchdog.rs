@@ -6,14 +6,11 @@ use std::time::Duration;
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::client::{Timeouts, CONNECT_TIMEOUT};
-use crate::error::GrindrError;
+use crate::error::{GrindrError, TimeoutPhase};
 
 const CHECKS_PER_STALL: u32 = 120;
 const DRAIN_FLOOR_BYTES_PER_SECOND: u64 = 8_000;
 const MAX_DRAIN_ALLOWANCE: Duration = Duration::from_secs(10 * 60);
-
-pub(crate) const STALLED: &str = "upload stalled";
-pub(crate) const UNANSWERED: &str = "no response to the upload";
 
 pub(crate) struct WatchedUpload {
 	pub sent: Arc<AtomicU64>,
@@ -71,13 +68,12 @@ impl Watchdog {
 		if now < self.deadline {
 			return Ok(());
 		}
-		Err(GrindrError::Http(
+		Err(GrindrError::Timeout(
 			if self.last_sent < self.upload.total {
-				STALLED
+				TimeoutPhase::Sending
 			} else {
-				UNANSWERED
-			}
-			.to_owned(),
+				TimeoutPhase::Headers
+			},
 		))
 	}
 }
@@ -103,10 +99,10 @@ mod tests {
 		})
 	}
 
-	fn http_message(result: Result<(), GrindrError>) -> String {
+	fn timeout_phase(result: Result<(), GrindrError>) -> TimeoutPhase {
 		match result {
-			Err(GrindrError::Http(message)) => message,
-			other => panic!("expected an Http error, got {other:?}"),
+			Err(GrindrError::Timeout(phase)) => phase,
+			other => panic!("expected a timeout, got {other:?}"),
 		}
 	}
 
@@ -129,7 +125,10 @@ mod tests {
 		let start = deadline - CONNECT_TIMEOUT - Timeouts::default().stall;
 
 		assert!(watchdog.observe(start + CONNECT_TIMEOUT).is_ok());
-		assert_eq!(http_message(watchdog.observe(deadline)), STALLED);
+		assert_eq!(
+			timeout_phase(watchdog.observe(deadline)),
+			TimeoutPhase::Sending
+		);
 	}
 
 	#[test]
@@ -149,7 +148,10 @@ mod tests {
 			.unwrap();
 
 		assert!(watchdog.observe(now + stall).is_ok());
-		assert_eq!(http_message(watchdog.observe(now + 2 * stall)), STALLED);
+		assert_eq!(
+			timeout_phase(watchdog.observe(now + 2 * stall)),
+			TimeoutPhase::Sending
+		);
 	}
 
 	#[test]
@@ -165,6 +167,9 @@ mod tests {
 		assert!(watchdog
 			.observe(deadline - Duration::from_millis(1))
 			.is_ok());
-		assert_eq!(http_message(watchdog.observe(deadline)), UNANSWERED);
+		assert_eq!(
+			timeout_phase(watchdog.observe(deadline)),
+			TimeoutPhase::Headers
+		);
 	}
 }

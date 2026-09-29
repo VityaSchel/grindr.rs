@@ -328,7 +328,9 @@ impl RefreshFailureKind {
 
 	fn classify(error: &GrindrError) -> Self {
 		match error {
-			GrindrError::Http(_) | GrindrError::Connect(_) => Self::Transport,
+			GrindrError::Http(_)
+			| GrindrError::Connect(_)
+			| GrindrError::Timeout(_) => Self::Transport,
 			GrindrError::Blocked(_) => Self::Blocked,
 			GrindrError::RateLimited => Self::RateLimited,
 			GrindrError::Api { .. } => Self::Server,
@@ -1101,6 +1103,12 @@ mod tests {
 		));
 		assert_eq!(transport, RefreshFailureKind::Transport);
 		assert!(transport.is_transient());
+		assert_eq!(
+			RefreshFailureKind::classify(&GrindrError::Timeout(
+				crate::error::TimeoutPhase::Headers
+			)),
+			RefreshFailureKind::Transport
+		);
 
 		assert!(RefreshFailureKind::classify(&GrindrError::RateLimited)
 			.is_transient());

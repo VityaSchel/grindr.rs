@@ -18,7 +18,7 @@ use body::StreamedBody;
 use watchdog::WatchedUpload;
 
 use crate::client::CALL_TIMEOUT;
-use crate::error::GrindrError;
+use crate::error::{GrindrError, TimeoutPhase};
 use crate::request::Answer;
 use crate::rest::{BodyHeaders, InnerClient};
 
@@ -91,9 +91,7 @@ impl InnerClient {
 		let status = response.status().as_u16();
 		let body = tokio::time::timeout(CALL_TIMEOUT, response.bytes())
 			.await
-			.map_err(|_| {
-				GrindrError::Http("upload response body timed out".to_owned())
-			})??;
+			.map_err(|_| GrindrError::Timeout(TimeoutPhase::Unfinished))??;
 		Ok(Answer { status, body })
 	}
 }

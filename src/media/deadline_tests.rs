@@ -1,15 +1,14 @@
 use std::time::{Duration, Instant};
 
 use super::tests::{client_with, counting, dripping, request};
-use super::{UNANSWERED, UNFINISHED};
 use crate::client::Timeouts;
 use crate::testserver::{self, HOLD_BEFORE_CLOSING, STALLED_PATH};
-use crate::GrindrError;
+use crate::{GrindrError, TimeoutPhase};
 
-fn http_message(error: &GrindrError) -> &str {
+fn timeout_phase(error: &GrindrError) -> TimeoutPhase {
 	match error {
-		GrindrError::Http(message) => message,
-		other => panic!("expected an HTTP error, got {other:?}"),
+		GrindrError::Timeout(phase) => *phase,
+		other => panic!("expected a timeout, got {other:?}"),
 	}
 }
 
@@ -44,7 +43,7 @@ async fn headers_that_never_come_fail_at_the_header_deadline() {
 
 	let error = client.fetch_media(request(&url)).await.unwrap_err();
 
-	assert_eq!(http_message(&error), UNANSWERED);
+	assert_eq!(timeout_phase(&error), TimeoutPhase::Headers);
 	assert!(started.elapsed() >= media);
 	assert!(started.elapsed() < HOLD_BEFORE_CLOSING);
 }
@@ -59,7 +58,7 @@ async fn a_body_that_stalls_longer_than_the_read_timeout_fails() {
 
 	let error = client.fetch_media(request(&url)).await.unwrap_err();
 
-	assert!(http_message(&error).contains("timed out"), "got {error:?}");
+	assert_eq!(timeout_phase(&error), TimeoutPhase::Receiving);
 }
 
 #[tokio::test]
@@ -74,6 +73,6 @@ async fn a_trickling_body_stops_at_the_body_ceiling() {
 
 	let error = client.fetch_media(request(&url)).await.unwrap_err();
 
-	assert_eq!(http_message(&error), UNFINISHED);
+	assert_eq!(timeout_phase(&error), TimeoutPhase::Unfinished);
 	assert!(started.elapsed() < Duration::from_millis(700));
 }

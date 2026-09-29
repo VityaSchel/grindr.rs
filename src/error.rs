@@ -20,6 +20,31 @@ impl fmt::Display for BlockKind {
 	}
 }
 
+/// Where a request was when it timed out, for a [`GrindrError::Timeout`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TimeoutPhase {
+	/// The request body stopped being sent.
+	Sending,
+	/// The response headers did not arrive in time.
+	Headers,
+	/// The response body stopped arriving.
+	Receiving,
+	/// The whole transfer ran past its ceiling.
+	Unfinished,
+}
+
+impl fmt::Display for TimeoutPhase {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.write_str(match self {
+			TimeoutPhase::Sending => "the upload stopped moving",
+			TimeoutPhase::Headers => "no response in time",
+			TimeoutPhase::Receiving => "the response stopped moving",
+			TimeoutPhase::Unfinished => "the transfer did not finish in time",
+		})
+	}
+}
+
 /// Errors returned by this crate.
 ///
 /// The enum is `#[non_exhaustive]`; match with a wildcard arm so that future
@@ -34,6 +59,10 @@ pub enum GrindrError {
 	/// The connection to the server could not be established (DNS, TCP or TLS).
 	#[error("could not connect: {0}")]
 	Connect(String),
+
+	/// A request timed out.
+	#[error("timed out: {0}")]
+	Timeout(TimeoutPhase),
 
 	/// Authentication problem that is not a server `401` (e.g. not signed in,
 	/// JWT could not be decoded, or a third-party account is not registered).
@@ -161,6 +190,12 @@ impl From<wreq::Error> for GrindrError {
 	fn from(e: wreq::Error) -> Self {
 		if e.is_connect() {
 			GrindrError::Connect(e.to_string())
+		} else if e.is_timeout() {
+			GrindrError::Timeout(if e.is_request() {
+				TimeoutPhase::Headers
+			} else {
+				TimeoutPhase::Receiving
+			})
 		} else {
 			GrindrError::Http(e.to_string())
 		}
@@ -169,7 +204,14 @@ impl From<wreq::Error> for GrindrError {
 
 #[cfg(test)]
 mod tests {
+	use std::time::{Duration, Instant};
+
 	use super::*;
+	use crate::client::{ClientSetup, Timeouts};
+	use crate::testserver::{
+		HOLD_BEFORE_CLOSING, MEDIA_PREFIX, SLOW_READ_PREFIX, STALLED_PATH,
+	};
+	use crate::{DeviceInfo, GrindrClient, Method};
 
 	#[tokio::test]
 	async fn a_refused_connection_is_a_connect_error() {
@@ -179,5 +221,80 @@ mod tests {
 			.await
 			.unwrap_err();
 		assert!(matches!(GrindrError::from(error), GrindrError::Connect(_)));
+	}
+
+	fn client_with(timeouts: Timeouts) -> GrindrClient {
+		GrindrClient::from_setup(ClientSetup {
+			device: DeviceInfo::generate(),
+			session: None,
+			timeouts,
+		})
+		.unwrap()
+	}
+
+	async fn upload_error(upload: Duration, path: &str) -> GrindrError {
+		client_with(Timeouts {
+			upload,
+			..Timeouts::default()
+		})
+		.request(Method::POST, path)
+		.unauthenticated()
+		.bytes("image/jpeg", vec![0; 64])
+		.send()
+		.await
+		.unwrap_err()
+	}
+
+	#[tokio::test]
+	async fn an_answer_still_arriving_at_the_call_ceiling_is_unfinished() {
+		let path = format!("{MEDIA_PREFIX}72?drip=100");
+
+		let error = upload_error(Duration::from_millis(300), &path).await;
+
+		assert!(
+			matches!(error, GrindrError::Timeout(TimeoutPhase::Unfinished)),
+			"got {error:?}"
+		);
+	}
+
+	#[tokio::test]
+	async fn a_reply_not_begun_by_the_call_ceiling_is_unfinished() {
+		let path = format!("{SLOW_READ_PREFIX}1600");
+
+		let error = upload_error(Duration::from_millis(300), &path).await;
+
+		assert!(
+			matches!(error, GrindrError::Timeout(TimeoutPhase::Unfinished)),
+			"got {error:?}"
+		);
+	}
+
+	#[tokio::test]
+	async fn an_api_request_without_headers_times_out_waiting_for_them() {
+		let read = Duration::from_millis(300);
+		let client = GrindrClient::from_setup(ClientSetup {
+			device: DeviceInfo::generate(),
+			session: None,
+			timeouts: Timeouts {
+				read,
+				..Timeouts::default()
+			},
+		})
+		.unwrap();
+		let started = Instant::now();
+
+		let error = client
+			.request(Method::GET, STALLED_PATH)
+			.unauthenticated()
+			.send()
+			.await
+			.unwrap_err();
+
+		assert!(
+			matches!(error, GrindrError::Timeout(TimeoutPhase::Headers)),
+			"got {error:?}"
+		);
+		assert!(started.elapsed() >= read);
+		assert!(started.elapsed() < HOLD_BEFORE_CLOSING);
 	}
 }

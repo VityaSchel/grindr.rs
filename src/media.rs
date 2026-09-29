@@ -4,7 +4,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use wreq::redirect::Policy;
 use wreq::{Method, Url};
 
-use crate::error::GrindrError;
+use crate::error::{GrindrError, TimeoutPhase};
 use crate::headers::GrindrHeaders;
 use crate::rest::InnerClient;
 
@@ -14,12 +14,10 @@ mod stream;
 #[cfg(test)]
 mod tests;
 
-use stream::UNANSWERED;
 pub use stream::{MediaStream, StreamRequest};
 
 pub(crate) const MEDIA_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) const MEDIA_BODY_TIMEOUT: Duration = Duration::from_secs(120);
-pub(crate) const UNFINISHED: &str = "the media body did not finish in time";
 const MAX_REDIRECTS: usize = 5;
 
 /// Which of the app's two HTTP stacks a fetch imitates.
@@ -152,7 +150,7 @@ impl InnerClient {
 			.send();
 		let mut response = tokio::time::timeout(self.timeouts.media, sending)
 			.await
-			.map_err(|_| GrindrError::Http(UNANSWERED.to_owned()))??;
+			.map_err(|_| GrindrError::Timeout(TimeoutPhase::Headers))??;
 
 		let status = response.status().as_u16();
 		let content_type = header(&response, "content-type");
@@ -173,7 +171,7 @@ impl InnerClient {
 			read_body(&mut response, request.max_bytes),
 		)
 		.await
-		.map_err(|_| GrindrError::Http(UNFINISHED.to_owned()))??;
+		.map_err(|_| GrindrError::Timeout(TimeoutPhase::Unfinished))??;
 
 		Ok(MediaResponse {
 			status,

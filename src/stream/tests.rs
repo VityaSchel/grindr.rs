@@ -6,7 +6,6 @@ use wreq::Method;
 
 use super::body::{SOURCE_ENDED_EARLY, SOURCE_RAN_LONG};
 use super::test_source::AlphabetSource;
-use super::watchdog::{STALLED, UNANSWERED};
 use super::BodySource;
 use crate::auth::{Credentials, Session, SessionKind, SessionToken};
 use crate::client::{ClientSetup, Timeouts};
@@ -14,7 +13,7 @@ use crate::testserver::{
 	self, QueuedReplies, Recorded, ACCEPTING_PATH, HOLD_BEFORE_CLOSING,
 	REFRESHED_PROFILE_ID, SILENT_PATH, SLOW_READ_PREFIX, STALLED_PATH,
 };
-use crate::{DeviceInfo, GrindrClient, GrindrError};
+use crate::{DeviceInfo, GrindrClient, GrindrError, TimeoutPhase};
 
 pub(super) struct SignedIn {
 	pub client: GrindrClient,
@@ -72,6 +71,15 @@ fn http_message<T: std::fmt::Debug>(result: Result<T, GrindrError>) -> String {
 	match result {
 		Err(GrindrError::Http(message)) => message,
 		other => panic!("expected an Http error, got {other:?}"),
+	}
+}
+
+fn timeout_phase<T: std::fmt::Debug>(
+	result: Result<T, GrindrError>,
+) -> TimeoutPhase {
+	match result {
+		Err(GrindrError::Timeout(phase)) => phase,
+		other => panic!("expected a timeout, got {other:?}"),
 	}
 }
 
@@ -199,7 +207,7 @@ async fn a_stalled_body_fails_within_the_stall_timeout() {
 
 	let result = signed_in.stream(STALLED_PATH, &source).await;
 
-	assert_eq!(http_message(result), STALLED);
+	assert_eq!(timeout_phase(result), TimeoutPhase::Sending);
 	let elapsed = started.elapsed();
 	assert!(
 		elapsed >= stall && elapsed < HOLD_BEFORE_CLOSING,
@@ -219,7 +227,7 @@ async fn a_silent_server_fails_within_the_response_deadline() {
 
 	let result = signed_in.stream(SILENT_PATH, &source).await;
 
-	assert_eq!(http_message(result), UNANSWERED);
+	assert_eq!(timeout_phase(result), TimeoutPhase::Headers);
 	let elapsed = started.elapsed();
 	assert!(
 		elapsed >= read && elapsed < HOLD_BEFORE_CLOSING,

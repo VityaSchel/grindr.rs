@@ -1,14 +1,16 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use tokio::time::Instant;
 use wreq::header::{HeaderName, HeaderValue};
 use wreq::Method;
 
 use crate::auth::{self, AuthState, Authorization};
 use crate::client::CALL_TIMEOUT;
-use crate::error::GrindrError;
+use crate::error::{GrindrError, TimeoutPhase};
 use crate::headers::GrindrHeaders;
 use crate::rest::{
 	apply_required_device_info, base_url, parse_json, raw_or_blocked,
@@ -338,12 +340,23 @@ impl InnerClient {
 				|builder| builder,
 			),
 		};
-		let response =
-			self.apply_timeouts(builder, &request.body).send().await?;
+		let ceiling = self.ceiling(&request.body);
+		let started = Instant::now();
+		let past_ceiling = |error: wreq::Error| match GrindrError::from(error) {
+			GrindrError::Timeout(_) if started.elapsed() >= ceiling => {
+				GrindrError::Timeout(TimeoutPhase::Unfinished)
+			}
+			error => error,
+		};
+		let response = self
+			.apply_timeouts(builder, &request.body)
+			.send()
+			.await
+			.map_err(past_ceiling)?;
 		self.note_server_date(response.headers());
 		Ok(Answer {
 			status: response.status().as_u16(),
-			body: response.bytes().await?,
+			body: response.bytes().await.map_err(past_ceiling)?,
 		})
 	}
 
@@ -414,16 +427,24 @@ impl InnerClient {
 		})
 	}
 
+	fn ceiling(&self, body: &Body) -> Duration {
+		match body {
+			Body::Bytes { .. } | Body::Signed { .. } => self.timeouts.upload,
+			_ => CALL_TIMEOUT,
+		}
+	}
+
 	pub(crate) fn apply_timeouts(
 		&self,
 		builder: wreq::RequestBuilder,
 		body: &Body,
 	) -> wreq::RequestBuilder {
+		let builder = builder.timeout(self.ceiling(body));
 		match body {
-			Body::Bytes { .. } | Body::Signed { .. } => builder
-				.timeout(self.timeouts.upload)
-				.read_timeout(self.timeouts.upload),
-			_ => builder.timeout(CALL_TIMEOUT),
+			Body::Bytes { .. } | Body::Signed { .. } => {
+				builder.read_timeout(self.timeouts.upload)
+			}
+			_ => builder,
 		}
 	}
 }

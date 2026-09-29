@@ -1,11 +1,17 @@
 use std::time::{Duration, Instant};
 
 use super::tests::{drain, request};
-use super::UNANSWERED;
 use crate::client::Timeouts;
 use crate::media::tests::{client_with, counting, dripping};
 use crate::testserver::{self, HOLD_BEFORE_CLOSING, STALLED_PATH};
-use crate::GrindrError;
+use crate::{GrindrError, TimeoutPhase};
+
+fn timeout_phase(error: &GrindrError) -> TimeoutPhase {
+	match error {
+		GrindrError::Timeout(phase) => *phase,
+		other => panic!("expected a timeout, got {other:?}"),
+	}
+}
 
 #[tokio::test]
 async fn the_header_deadline_fires_when_the_headers_stall() {
@@ -19,10 +25,7 @@ async fn the_header_deadline_fires_when_the_headers_stall() {
 
 	let err = client.stream_media(request(&url)).await.unwrap_err();
 
-	assert!(
-		matches!(&err, GrindrError::Http(message) if message == UNANSWERED),
-		"got {err:?}"
-	);
+	assert_eq!(timeout_phase(&err), TimeoutPhase::Headers);
 	assert!(started.elapsed() >= deadline);
 	assert!(started.elapsed() < HOLD_BEFORE_CLOSING);
 }
@@ -42,10 +45,7 @@ async fn a_mid_body_stall_longer_than_the_read_timeout_errors() {
 	let err = stream.chunk().await.unwrap_err();
 
 	assert!(!first.is_empty());
-	assert!(
-		matches!(&err, GrindrError::Http(message) if message.contains("timed out")),
-		"got {err:?}"
-	);
+	assert_eq!(timeout_phase(&err), TimeoutPhase::Receiving);
 	assert!(
 		stalled.elapsed() < pause,
 		"the server resumed before the error"

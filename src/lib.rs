@@ -68,7 +68,7 @@ pub use auth::{
 pub use captcha::{CaptchaAction, CaptchaTokenProvider};
 pub use client::{probe_emulation, GrindrClient};
 pub use device::DeviceInfo;
-pub use error::{BanInfo, BanKind, BlockKind, GrindrError};
+pub use error::{BanInfo, BanKind, BlockKind, GrindrError, TimeoutPhase};
 pub use headers::{
 	build_device_info_header, build_platform_user_agent, build_user_agent,
 	GrindrHeaders, APP_VERSION,

@@ -94,6 +94,11 @@ impl RedirectedBaseUrl {
 		REDIRECTED_BASE_URL.set(Some(base_url.leak()));
 		Self
 	}
+
+	pub(crate) fn by_name() -> Self {
+		let port = base_url().rsplit(':').next().expect("a port").to_owned();
+		Self::on_this_thread(format!("http://localhost:{port}"))
+	}
 }
 
 impl Drop for RedirectedBaseUrl {

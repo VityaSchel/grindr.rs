@@ -1,19 +1,29 @@
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use wreq::redirect::Policy;
 use wreq::{Method, Url};
 
+use crate::client::build_media_client;
 use crate::error::{GrindrError, TimeoutPhase};
 use crate::headers::GrindrHeaders;
-use crate::rest::InnerClient;
+use crate::rest::{Fingerprint, InnerClient};
 
 #[cfg(test)]
 mod deadline_tests;
+mod liveness;
+#[cfg(test)]
+mod recovery_tests;
+#[cfg(test)]
+pub(crate) mod relay;
 mod stream;
 #[cfg(test)]
 mod tests;
 
+use liveness::{Attempt, Progress};
+pub(crate) use liveness::{CountConnections, MediaLiveness};
 pub use stream::{MediaStream, StreamRequest};
 
 pub(crate) const MEDIA_TIMEOUT: Duration = Duration::from_secs(20);
@@ -58,13 +68,12 @@ pub struct MediaResponse {
 	pub body: Bytes,
 }
 
+fn is_cdn_host(host: &str) -> bool {
+	host == "cdns.grindr.com" || host.ends_with(".cloudfront.net")
+}
+
 fn is_media_host(url: &Url) -> bool {
-	if url.scheme() != "https" {
-		return false;
-	}
-	url.host_str().is_some_and(|host| {
-		host == "cdns.grindr.com" || host.ends_with(".cloudfront.net")
-	})
+	url.scheme() == "https" && url.host_str().is_some_and(is_cdn_host)
 }
 
 #[cfg(not(test))]
@@ -75,7 +84,8 @@ fn is_allowed(url: &Url) -> bool {
 #[cfg(test)]
 fn is_allowed(url: &Url) -> bool {
 	is_media_host(url)
-		|| url.as_str().starts_with(crate::testserver::base_url())
+		|| url.scheme() == "http"
+			&& matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
 }
 
 fn header(response: &wreq::Response, name: &str) -> Option<String> {
@@ -92,11 +102,16 @@ struct Target<'a> {
 	fetcher: MediaFetcher,
 }
 
+enum Sent {
+	Answered(wreq::Response, Progress),
+	Stalled(Attempt),
+}
+
 impl InnerClient {
 	async fn media_request(
 		&self,
-		target: Target<'_>,
-	) -> Result<wreq::RequestBuilder, GrindrError> {
+		target: &Target<'_>,
+	) -> Result<(wreq::RequestBuilder, Attempt), GrindrError> {
 		let url = Url::parse(target.url).map_err(|e| {
 			GrindrError::InvalidRequest(format!(
 				"media url {:?}: {e}",
@@ -111,6 +126,7 @@ impl InnerClient {
 		}
 
 		let fp = self.fingerprint().await;
+		let host = url.host_str().unwrap_or_default().to_owned();
 		let headers = match target.fetcher {
 			MediaFetcher::ImageLoader => {
 				GrindrHeaders::build_media(&fp.user_agent, target.range)?
@@ -120,37 +136,87 @@ impl InnerClient {
 			}
 		};
 
-		let mut request = fp.http.request(Method::GET, url);
+		let mut request = fp.media_http.request(Method::GET, url);
 		for (name, value) in headers.items {
 			request = request.header(name, value);
 		}
-		Ok(request.redirect(Policy::custom(|attempt| {
-			if attempt.previous().len() > MAX_REDIRECTS
-				|| !is_allowed(attempt.url())
-			{
-				attempt.stop()
+		let attempt = self.media_liveness.begin(&host, fp);
+		let redirected = attempt.redirect_marker();
+		let request = request.redirect(Policy::custom(move |hop| {
+			if hop.previous().len() > MAX_REDIRECTS || !is_allowed(hop.url()) {
+				hop.stop()
 			} else {
-				attempt.follow()
+				redirected.store(true, Ordering::SeqCst);
+				hop.follow()
 			}
-		})))
+		}));
+		Ok((request, attempt))
+	}
+
+	async fn send_media_once(
+		&self,
+		target: &Target<'_>,
+	) -> Result<Sent, GrindrError> {
+		let (request, attempt) = self.media_request(target).await?;
+		let sending = request.read_timeout(self.timeouts.read).send();
+		match tokio::time::timeout(self.timeouts.media, sending).await {
+			Ok(response) => {
+				let response = response?;
+				let host = response.url().host_str().unwrap_or_default();
+				let progress = self.media_liveness.answered(&attempt, host);
+				Ok(Sent::Answered(response, progress))
+			}
+			Err(_) => Ok(Sent::Stalled(attempt)),
+		}
+	}
+
+	async fn send_media(
+		&self,
+		target: Target<'_>,
+	) -> Result<(wreq::Response, Progress), GrindrError> {
+		let stalled = match self.send_media_once(&target).await? {
+			Sent::Answered(response, progress) => {
+				return Ok((response, progress))
+			}
+			Sent::Stalled(attempt) => attempt,
+		};
+		let current = self.retire_if_stuck(&stalled).await;
+		if stalled.resendable_on(&current) {
+			match self.send_media_once(&target).await? {
+				Sent::Answered(response, progress) => {
+					return Ok((response, progress));
+				}
+				Sent::Stalled(again) => {
+					self.retire_if_stuck(&again).await;
+				}
+			}
+		}
+		Err(GrindrError::Timeout(TimeoutPhase::Headers))
+	}
+
+	async fn retire_if_stuck(&self, stalled: &Attempt) -> Arc<Fingerprint> {
+		let mut current = self.fingerprint.write().await;
+		if self.media_liveness.retire(stalled, &current) {
+			if let Ok(media_http) =
+				build_media_client(self.timeouts.read, &self.media_liveness)
+			{
+				*current = Arc::new(current.with_media_http(media_http));
+			}
+		}
+		Arc::clone(&current)
 	}
 
 	pub(crate) async fn fetch_media(
 		&self,
 		request: MediaRequest<'_>,
 	) -> Result<MediaResponse, GrindrError> {
-		let sending = self
-			.media_request(Target {
+		let (mut response, progress) = self
+			.send_media(Target {
 				url: request.url,
 				range: request.range,
 				fetcher: request.fetcher,
 			})
-			.await?
-			.read_timeout(self.timeouts.read)
-			.send();
-		let mut response = tokio::time::timeout(self.timeouts.media, sending)
-			.await
-			.map_err(|_| GrindrError::Timeout(TimeoutPhase::Headers))??;
+			.await?;
 
 		let status = response.status().as_u16();
 		let content_type = header(&response, "content-type");
@@ -168,7 +234,7 @@ impl InnerClient {
 
 		let body = tokio::time::timeout(
 			self.timeouts.media_body,
-			read_body(&mut response, request.max_bytes),
+			read_body(&mut response, request.max_bytes, &progress),
 		)
 		.await
 		.map_err(|_| GrindrError::Timeout(TimeoutPhase::Unfinished))??;
@@ -186,9 +252,11 @@ impl InnerClient {
 async fn read_body(
 	response: &mut wreq::Response,
 	max_bytes: usize,
+	progress: &Progress,
 ) -> Result<Bytes, GrindrError> {
 	let mut body = BytesMut::new();
 	while let Some(chunk) = response.chunk().await? {
+		progress.record();
 		if body.len() + chunk.len() > max_bytes {
 			return Err(GrindrError::MediaTooLarge { max_bytes });
 		}

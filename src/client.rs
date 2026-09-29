@@ -12,8 +12,8 @@ use crate::device::DeviceInfo;
 use crate::error::GrindrError;
 use crate::headers::build_user_agent;
 use crate::media::{
-	MediaRequest, MediaResponse, MediaStream, StreamRequest,
-	MEDIA_BODY_TIMEOUT, MEDIA_TIMEOUT,
+	CountConnections, MediaLiveness, MediaRequest, MediaResponse, MediaStream,
+	StreamRequest, MEDIA_BODY_TIMEOUT, MEDIA_TIMEOUT,
 };
 use crate::request::RequestBuilder;
 use crate::rest::{Fingerprint, InnerClient};
@@ -201,6 +201,32 @@ fn build_http_client(read_timeout: Duration) -> Result<Client, GrindrError> {
 		.map_err(Into::into)
 }
 
+#[cfg(not(test))]
+fn media_client_builder() -> wreq::ClientBuilder {
+	grindr_client_builder()
+}
+
+#[cfg(test)]
+fn media_client_builder() -> wreq::ClientBuilder {
+	if crate::media::relay::media_over_http2() {
+		grindr_client_builder().http2_only()
+	} else {
+		grindr_client_builder()
+	}
+}
+
+pub(crate) fn build_media_client(
+	read_timeout: Duration,
+	liveness: &Arc<MediaLiveness>,
+) -> Result<Client, GrindrError> {
+	media_client_builder()
+		.read_timeout(read_timeout)
+		.dns_resolver(Arc::clone(liveness))
+		.connector_layer(CountConnections(Arc::clone(liveness)))
+		.build()
+		.map_err(Into::into)
+}
+
 fn build_ws_client() -> Result<Client, GrindrError> {
 	// Websocket endpoint is http/1.1
 	grindr_client_builder()
@@ -214,13 +240,16 @@ fn build_ws_client() -> Result<Client, GrindrError> {
 fn build_fingerprint(
 	device: DeviceInfo,
 	timeouts: Timeouts,
+	media_liveness: &Arc<MediaLiveness>,
 ) -> Result<Arc<Fingerprint>, GrindrError> {
 	let user_agent = build_user_agent(&device, "Free");
 	let http = build_http_client(timeouts.read)?;
 	let ws_http = build_ws_client()?;
+	let media_http = build_media_client(timeouts.read, media_liveness)?;
 	Ok(Arc::new(Fingerprint {
 		http,
 		ws_http,
+		media_http,
 		device,
 		user_agent,
 	}))
@@ -283,7 +312,9 @@ impl GrindrClient {
 	}
 
 	pub(crate) fn from_setup(setup: ClientSetup) -> Result<Self, GrindrError> {
-		let fingerprint = build_fingerprint(setup.device, setup.timeouts)?;
+		let media_liveness = MediaLiveness::new();
+		let fingerprint =
+			build_fingerprint(setup.device, setup.timeouts, &media_liveness)?;
 
 		let (signing_key_tx, signing_key_rx) = watch::channel(None);
 		let inner = Arc::new(InnerClient {
@@ -293,6 +324,7 @@ impl GrindrClient {
 			signing_key_tx,
 			server_offset_ms: std::sync::atomic::AtomicI64::new(0),
 			timeouts: setup.timeouts,
+			media_liveness,
 		});
 
 		let (auth_state, session_rx) = AuthState::new(setup.session);
@@ -399,7 +431,11 @@ impl GrindrClient {
 	/// having noticed, stalling the first request that inherits one.
 	pub async fn reset_transport(&self) -> Result<(), GrindrError> {
 		let device = self.inner.fingerprint().await.device.clone();
-		let fingerprint = build_fingerprint(device, self.inner.timeouts)?;
+		let fingerprint = build_fingerprint(
+			device,
+			self.inner.timeouts,
+			&self.inner.media_liveness,
+		)?;
 		*self.inner.fingerprint.write().await = fingerprint;
 		Ok(())
 	}
@@ -583,13 +619,16 @@ impl GrindrClient {
 		self.inner.ensure_device_key(&self.auth).await
 	}
 
-	/// Fetches a CDN file on the transport the API uses, with the headers the
-	/// app's image loader sends.
+	/// Fetches a CDN file with the API's fingerprint on a pool of its own, with
+	/// the headers the app's image loader sends.
 	///
 	/// Only `https` on `cdns.grindr.com` or `*.cloudfront.net` is accepted,
 	/// redirects included; anything else is [`GrindrError::InvalidRequest`]
 	/// before a socket is opened. The headers must arrive within 20 s and the
-	/// body within 120 s, with a read timeout between two pieces. A
+	/// body within 120 s, with a read timeout between two pieces. If the
+	/// headers are late, the request went out on an already-open connection,
+	/// and nothing else arrived from that host while it waited, the connection
+	/// is assumed dead and the request is sent once more on a new one. A
 	/// non-success status comes back as an ordinary [`MediaResponse`].
 	pub async fn fetch_media(
 		&self,
@@ -598,12 +637,13 @@ impl GrindrClient {
 		self.inner.fetch_media(request).await
 	}
 
-	/// Opens a CDN file as a stream on the transport the API uses, with the
-	/// same headers and host rules as [`fetch_media`](Self::fetch_media).
+	/// Opens a CDN file as a stream, with the same transport, headers and host
+	/// rules as [`fetch_media`](Self::fetch_media).
 	///
 	/// The headers must arrive within 20 s; the body has no total deadline,
-	/// only a read timeout between two pieces. A non-success status comes back
-	/// as an ordinary [`MediaStream`].
+	/// only a read timeout between two pieces. Late headers get the same single
+	/// retry on a new connection as in [`fetch_media`](Self::fetch_media). A
+	/// non-success status comes back as an ordinary [`MediaStream`].
 	pub async fn stream_media(
 		&self,
 		request: StreamRequest<'_>,
@@ -619,7 +659,11 @@ impl GrindrClient {
 		&self,
 		device: DeviceInfo,
 	) -> Result<DeviceInfo, GrindrError> {
-		let new_fp = build_fingerprint(device, self.inner.timeouts)?;
+		let new_fp = build_fingerprint(
+			device,
+			self.inner.timeouts,
+			&self.inner.media_liveness,
+		)?;
 		let old_fp = {
 			let mut guard = self.inner.fingerprint.write().await;
 			std::mem::replace(&mut *guard, new_fp)
@@ -685,9 +729,14 @@ impl GrindrClient {
 		*fingerprint = Arc::new(Fingerprint {
 			http,
 			ws_http: fingerprint.ws_http.clone(),
+			media_http: fingerprint.media_http.clone(),
 			device: fingerprint.device.clone(),
 			user_agent: fingerprint.user_agent.clone(),
 		});
+	}
+
+	pub(crate) fn media_retirements(&self) -> u64 {
+		self.inner.media_liveness.retirements()
 	}
 }
 

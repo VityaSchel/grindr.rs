@@ -2,7 +2,9 @@ use std::time::{Duration, Instant};
 
 use super::tests::{client_with, counting, dripping, request};
 use crate::client::Timeouts;
-use crate::testserver::{self, HOLD_BEFORE_CLOSING, STALLED_PATH};
+use crate::testserver::{
+	self, RedirectedBaseUrl, HOLD_BEFORE_CLOSING, STALLED_PATH,
+};
 use crate::{GrindrError, TimeoutPhase};
 
 fn timeout_phase(error: &GrindrError) -> TimeoutPhase {
@@ -38,6 +40,7 @@ async fn headers_that_never_come_fail_at_the_header_deadline() {
 		media,
 		..Timeouts::default()
 	});
+	let _named = RedirectedBaseUrl::by_name();
 	let url = format!("{}{STALLED_PATH}", testserver::base_url());
 	let started = Instant::now();
 
@@ -46,6 +49,7 @@ async fn headers_that_never_come_fail_at_the_header_deadline() {
 	assert_eq!(timeout_phase(&error), TimeoutPhase::Headers);
 	assert!(started.elapsed() >= media);
 	assert!(started.elapsed() < HOLD_BEFORE_CLOSING);
+	assert_eq!(client.media_retirements(), 0);
 }
 
 #[tokio::test]

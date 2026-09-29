@@ -1,7 +1,7 @@
 use bytes::Bytes;
 
-use super::{header, MediaFetcher, Target};
-use crate::error::{GrindrError, TimeoutPhase};
+use super::{header, MediaFetcher, Progress, Target};
+use crate::error::GrindrError;
 use crate::rest::InnerClient;
 
 #[cfg(test)]
@@ -34,13 +34,18 @@ pub struct MediaStream {
 	/// `Accept-Ranges` header.
 	pub accept_ranges: Option<String>,
 	response: wreq::Response,
+	progress: Progress,
 }
 
 impl MediaStream {
 	/// Next piece of the decompressed body, `None` once it has ended. A pause
 	/// longer than the read timeout between two pieces is an error.
 	pub async fn chunk(&mut self) -> Result<Option<Bytes>, GrindrError> {
-		self.response.chunk().await.map_err(Into::into)
+		let chunk = self.response.chunk().await?;
+		if chunk.is_some() {
+			self.progress.record();
+		}
+		Ok(chunk)
 	}
 }
 
@@ -49,18 +54,13 @@ impl InnerClient {
 		&self,
 		request: StreamRequest<'_>,
 	) -> Result<MediaStream, GrindrError> {
-		let sending = self
-			.media_request(Target {
+		let (response, progress) = self
+			.send_media(Target {
 				url: request.url,
 				range: request.range,
 				fetcher: request.fetcher,
 			})
-			.await?
-			.read_timeout(self.timeouts.read)
-			.send();
-		let response = tokio::time::timeout(self.timeouts.media, sending)
-			.await
-			.map_err(|_| GrindrError::Timeout(TimeoutPhase::Headers))??;
+			.await?;
 		Ok(MediaStream {
 			status: response.status().as_u16(),
 			content_type: header(&response, "content-type"),
@@ -68,6 +68,7 @@ impl InnerClient {
 			content_range: header(&response, "content-range"),
 			accept_ranges: header(&response, "accept-ranges"),
 			response,
+			progress,
 		})
 	}
 }

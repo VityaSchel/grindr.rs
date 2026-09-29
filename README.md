@@ -159,7 +159,7 @@ Only the initial request carries a `geohash`; automatic background refreshes nev
 
 | Method                                               | Description                                                                                    |
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `fetch_media(MediaRequest) -> Result<MediaResponse>` | GET a CDN file on the transport the API uses, with the app's image headers                     |
+| `fetch_media(MediaRequest) -> Result<MediaResponse>` | GET a CDN file with the API's fingerprint on its own pool, with the app's image headers        |
 | `stream_media(StreamRequest) -> Result<MediaStream>` | The same GET, handed back once the headers arrive; the body is read piece by piece via `chunk` |
 
 Only `https` on `cdns.grindr.com` or `*.cloudfront.net` is accepted, redirects included; anything else is `GrindrError::InvalidRequest` before a socket is opened. Non-success status returns as `MediaResponse`.
@@ -231,6 +231,8 @@ Everything under **Identity and session** and **Requests and errors** — except
 - Requests with streamed body: stall timeout
 - Media fetches: 20 s for the response headers and 30 s between body chunks
 - `fetch_media` times out after 120 s on body
+
+If a media request gets no headers within 20 s over an already-open connection, and nothing else arrived from that host while it waited, the connection is assumed dead, so the request is sent once more on a new connection, and later media requests use new connections too.
 
 **Downloads**
 

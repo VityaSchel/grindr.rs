@@ -29,12 +29,15 @@ wreq = { version = "0.15", features = ["gzip", "json", "websocket"] }
 bytes = "1"
 http-body = "1"
 http2 = "0.4"
+tower-layer = "0.3"
+tower-service = "0.3"
 tokio = { version = "1", features = [
 	"sync",
 	"time",
 	"rt",
 	"rt-multi-thread",
 	"macros",
+	"net",
 ] }
 futures-util = { version = "0.3", default-features = false, features = [
 	"sink",
@@ -56,6 +59,7 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 httpdate = "1"
 
 [dev-dependencies]
+http = "1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["test-util", "net"] }
 

@@ -53,8 +53,22 @@ pub struct Fingerprint {
 	pub http: Client,
 	/// ALPN: `["http/1.1"]`
 	pub ws_http: Client,
+	/// ALPN: `["h2", "http/1.1"]`, pooled apart from the API.
+	pub media_http: Client,
 	pub device: DeviceInfo,
 	pub user_agent: String,
+}
+
+impl Fingerprint {
+	pub(crate) fn with_media_http(&self, media_http: Client) -> Self {
+		Self {
+			http: self.http.clone(),
+			ws_http: self.ws_http.clone(),
+			media_http,
+			device: self.device.clone(),
+			user_agent: self.user_agent.clone(),
+		}
+	}
 }
 
 pub(crate) const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
@@ -109,6 +123,7 @@ pub(crate) struct InnerClient {
 	pub signing_key_tx: watch::Sender<Option<DeviceSigningKey>>,
 	pub server_offset_ms: AtomicI64,
 	pub timeouts: Timeouts,
+	pub media_liveness: Arc<crate::media::MediaLiveness>,
 }
 
 fn local_now_ms() -> i64 {

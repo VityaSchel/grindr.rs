@@ -870,7 +870,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn sign_in_is_marked_but_a_refresh_of_the_same_url_is_not() {
+	async fn sign_in_and_a_refresh_of_the_same_url_are_both_marked() {
 		let device = DeviceInfo::generate();
 		let device_id = device.device_id.clone();
 		let client = GrindrClient::new(device, None).unwrap();
@@ -919,8 +919,44 @@ mod tests {
 			.expect("refresh recorded");
 		assert_eq!(
 			refresh.header("requirerealdeviceinfo"),
-			None,
-			"RefreshSessionRestService posts the same URL and annotates nothing"
+			Some("true"),
+			"RefreshSessionRestService annotates refresh with requireRealDeviceInfo"
+		);
+		assert_eq!(
+			refresh.headers[0].0.to_ascii_lowercase(),
+			"requirerealdeviceinfo",
+			"the device-info header precedes every client header"
+		);
+	}
+
+	#[tokio::test]
+	async fn a_third_party_refresh_is_marked() {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		let client = GrindrClient::new(
+			device,
+			Some(Session {
+				credentials: crate::auth::Credentials {
+					email: "a@b.c".to_owned(),
+					profile_id: None,
+					auth_token: "stored-tok".to_owned(),
+					kind: crate::auth::SessionKind::Google,
+					third_party_user_id: Some("vendor-uid".to_owned()),
+				},
+				token: None,
+			}),
+		)
+		.unwrap();
+		client.refresh_session().await.unwrap_err();
+
+		let refresh = crate::testserver::requests_from(&device_id)
+			.into_iter()
+			.find(|r| r.path == "/v8/sessions/thirdparty")
+			.expect("refresh recorded");
+		assert_eq!(refresh.header("requirerealdeviceinfo"), Some("true"));
+		assert_eq!(
+			refresh.headers[0].0.to_ascii_lowercase(),
+			"requirerealdeviceinfo"
 		);
 	}
 

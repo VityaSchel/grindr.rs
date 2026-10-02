@@ -184,7 +184,7 @@ impl InnerClient {
 		method: Method,
 		path: &str,
 		body: Option<&TReq>,
-		required_device_info: Option<RequiredDeviceInfo>,
+		required_device_info: RequiredDeviceInfo,
 	) -> Result<TResp, GrindrError>
 	where
 		TReq: Serialize + ?Sized,
@@ -195,7 +195,7 @@ impl InnerClient {
 			None => Body::Empty,
 		};
 		let mut request = Request::new(method, path, body);
-		request.required_device_info = required_device_info;
+		request.required_device_info = Some(required_device_info);
 		parse_json(self.anonymous(&request).await?)
 	}
 

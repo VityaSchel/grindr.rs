@@ -128,6 +128,8 @@ pub enum VerificationRegion {
 	Br,
 	/// Australia.
 	Au,
+	/// United States.
+	Us,
 	/// A region this version does not model.
 	Other,
 }
@@ -226,6 +228,7 @@ fn region_from_reason(reason: Option<&str>) -> VerificationRegion {
 		Some("UK_VERIFICATION_REQUIRED") => VerificationRegion::Uk,
 		Some("BR_VERIFICATION_REQUIRED") => VerificationRegion::Br,
 		Some("AU_VERIFICATION_REQUIRED") => VerificationRegion::Au,
+		Some("US_VERIFICATION_REQUIRED") => VerificationRegion::Us,
 		_ => VerificationRegion::Other,
 	}
 }
@@ -477,14 +480,13 @@ pub(crate) async fn create_session(
 	body: &impl AuthRequest,
 	kind: SessionKind,
 	third_party_user_id: Option<String>,
-	required_device_info: Option<crate::rest::RequiredDeviceInfo>,
 ) -> Result<(Session, SignInResult), GrindrError> {
 	let resp: SessionResponse = inner
 		.request_no_auth(
 			wreq::Method::POST,
 			path,
 			Some(body),
-			required_device_info,
+			crate::rest::RequiredDeviceInfo::Real,
 		)
 		.await?;
 
@@ -533,15 +535,8 @@ pub(crate) async fn sign_in_with_email(
 		captcha_token: captcha_token.map(str::to_owned),
 	};
 	let epoch = auth.epoch();
-	let (session, result) = create_session(
-		inner,
-		path,
-		&body,
-		SessionKind::Email,
-		None,
-		Some(crate::rest::RequiredDeviceInfo::Real),
-	)
-	.await?;
+	let (session, result) =
+		create_session(inner, path, &body, SessionKind::Email, None).await?;
 	if !auth.set_session_if_current(session, epoch).await {
 		return Err(GrindrError::SessionCleared);
 	}
@@ -571,7 +566,7 @@ pub(crate) async fn sign_in_with_third_party(
 			wreq::Method::POST,
 			"/v8/sessions/thirdparty",
 			Some(&body),
-			Some(crate::rest::RequiredDeviceInfo::Real),
+			crate::rest::RequiredDeviceInfo::Real,
 		)
 		.await?;
 	let tp = parsed.authentication_response.ok_or_else(|| {
@@ -632,7 +627,7 @@ async fn refresh_third_party_session(
 			wreq::Method::POST,
 			"/v8/sessions/thirdparty",
 			Some(&body),
-			None,
+			crate::rest::RequiredDeviceInfo::Real,
 		)
 		.await?;
 	let tp = parsed.authentication_response.ok_or_else(|| {
@@ -673,7 +668,6 @@ pub(crate) async fn refresh_session(
 				"/v8/sessions",
 				&body,
 				SessionKind::Email,
-				None,
 				None,
 			)
 			.await?
@@ -786,7 +780,7 @@ async fn assignment_enabled(
 			wreq::Method::GET,
 			"/public/v1/assignments",
 			None,
-			Some(crate::rest::RequiredDeviceInfo::Anonymous),
+			crate::rest::RequiredDeviceInfo::Anonymous,
 		)
 		.await?;
 	Ok(resp
@@ -1083,6 +1077,20 @@ mod tests {
 				reason: "UK_VERIFICATION_REQUIRED".to_owned(),
 			})
 		);
+	}
+
+	#[test]
+	fn the_verification_reason_picks_the_region() {
+		for (reason, region) in [
+			("UK_VERIFICATION_REQUIRED", VerificationRegion::Uk),
+			("BR_VERIFICATION_REQUIRED", VerificationRegion::Br),
+			("AU_VERIFICATION_REQUIRED", VerificationRegion::Au),
+			("US_VERIFICATION_REQUIRED", VerificationRegion::Us),
+			("BANNED_USER", VerificationRegion::Other),
+		] {
+			assert_eq!(region_from_reason(Some(reason)), region, "{reason}");
+		}
+		assert_eq!(region_from_reason(None), VerificationRegion::Other);
 	}
 
 	#[test]

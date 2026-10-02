@@ -23,7 +23,7 @@ This crate is a transport: it handles authentication, fingerprinting, connection
 
 ```toml
 [dependencies]
-grindr = "0.26"
+grindr = "0.27"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 serde_json = "1"
 ```
@@ -204,7 +204,7 @@ Everything under **Identity and session** and **Requests and errors** — except
 - `SessionKind` — `Email`, `Google` or `Facebook`
 - `SignInResult` — `{ profile_id, restriction }`, returned by the auth methods
 - `Restriction` — account restriction from the session JWT, the session is still valid: `AgeVerification { region, reason }` / `TimedBan(BanDetails)` / `TrustVendorRejected` / `Other(String)`
-- `VerificationRegion` — `Uk` / `Br` / `Au` / `Other`
+- `VerificationRegion` — `Uk` / `Br` / `Au` / `Us` / `Other`
 - `BanDetails` — `{ expiry_time, reason, sub_reason, is_automated }`
 
 **Requests and errors**

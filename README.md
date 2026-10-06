@@ -295,4 +295,6 @@ Rust **1.88**.
 
 ## License
 
-[MIT](./LICENSE)
+Code: [MIT](./LICENSE)
+
+Logo: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), adapted from the [Rust logo](https://github.com/rust-lang/rust-artwork) by the Rust Foundation with the Open Grind mask added

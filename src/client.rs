@@ -624,10 +624,10 @@ impl GrindrClient {
 	///
 	/// Only `https` on `cdns.grindr.com`, `*.cloudfront.net`, `api.giphy.com`,
 	/// `media.giphy.com` or `media0.giphy.com` to `media4.giphy.com` is
-	/// accepted, redirects included; anything else is
-	/// [`GrindrError::InvalidRequest`] before a socket is opened. The headers
-	/// must arrive within 20 s and the body within 120 s, with a read timeout
-	/// between two pieces. If the headers are late, the request went out on an
+	/// accepted; anything else is [`GrindrError::InvalidRequest`] before a
+	/// socket is opened, and a redirect off these hosts is not followed. The
+	/// headers must arrive within 20 s and the body within 120 s, with a read
+	/// timeout between two pieces. If the headers are late, the request went out on an
 	/// already-open connection, and nothing else arrived from that host while
 	/// it waited, the connection is assumed dead and the request is sent once
 	/// more on a new one. A non-success status comes back as an ordinary

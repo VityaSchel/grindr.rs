@@ -162,7 +162,7 @@ Only the initial request carries a `geohash`; automatic background refreshes nev
 | `fetch_media(MediaRequest) -> Result<MediaResponse>` | GET a media file with the API's fingerprint on its own pool, with the `MediaFetcher`'s headers |
 | `stream_media(StreamRequest) -> Result<MediaStream>` | The same GET, handed back once the headers arrive; the body is read piece by piece via `chunk` |
 
-Only `https` on `cdns.grindr.com`, `*.cloudfront.net`, `api.giphy.com`, `media.giphy.com` or `media0.giphy.com` to `media4.giphy.com` is accepted, redirects included; anything else is `GrindrError::InvalidRequest` before a socket is opened. Non-success status returns as `MediaResponse`.
+Only `https` on `cdns.grindr.com`, `*.cloudfront.net`, `api.giphy.com`, `media.giphy.com` or `media0.giphy.com` to `media4.giphy.com` is accepted; anything else is `GrindrError::InvalidRequest` before a socket is opened. A redirect off these hosts is not followed. Non-success status, that redirect included, returns as `MediaResponse`.
 
 #### Device key
 

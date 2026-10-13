@@ -10,6 +10,7 @@ use crate::error::GrindrError;
 /// version mirrors this string but means nothing to Cargo on its own.
 pub const APP_VERSION: &str = "26.20.0.187695";
 pub(crate) const BUILD_NUMBER: &str = "187695";
+const OKHTTP_USER_AGENT: &str = "okhttp/5.4.0";
 
 const MEDIA_ACCEPT: &str = "image/webp,image/*;q=0.8";
 
@@ -169,22 +170,40 @@ impl GrindrHeaders {
 		Self::finish_media(items, range)
 	}
 
+	/// Build the header set a plain OkHttp client sends.
+	pub fn build_plain(range: Option<&str>) -> Result<Self, GrindrError> {
+		let items = vec![
+			range_or_gzip(range)?,
+			(
+				HeaderName::from_static("user-agent"),
+				HeaderValue::from_static(OKHTTP_USER_AGENT),
+			),
+		];
+		Ok(Self { items })
+	}
+
 	fn finish_media(
 		mut items: Vec<(HeaderName, HeaderValue)>,
 		range: Option<&str>,
 	) -> Result<Self, GrindrError> {
-		match range {
-			Some(range) => items.push((
-				HeaderName::from_static("range"),
-				HeaderValue::from_str(range).map_err(invalid_header)?,
-			)),
-			None => items.push((
-				HeaderName::from_static("accept-encoding"),
-				HeaderValue::from_static("gzip"),
-			)),
-		}
+		items.push(range_or_gzip(range)?);
 		Ok(Self { items })
 	}
+}
+
+fn range_or_gzip(
+	range: Option<&str>,
+) -> Result<(HeaderName, HeaderValue), GrindrError> {
+	Ok(match range {
+		Some(range) => (
+			HeaderName::from_static("range"),
+			HeaderValue::from_str(range).map_err(invalid_header)?,
+		),
+		None => (
+			HeaderName::from_static("accept-encoding"),
+			HeaderValue::from_static("gzip"),
+		),
+	})
 }
 
 fn invalid_header<E: std::fmt::Display>(e: E) -> GrindrError {

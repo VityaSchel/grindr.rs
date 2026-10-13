@@ -620,7 +620,7 @@ impl GrindrClient {
 	}
 
 	/// Fetches a media file with the API's fingerprint on a pool of its own,
-	/// with the headers the app's image loader sends.
+	/// with the headers of the request's [`MediaFetcher`](crate::MediaFetcher).
 	///
 	/// Only `https` on `cdns.grindr.com`, `*.cloudfront.net`, `api.giphy.com`,
 	/// `media.giphy.com` or `media0.giphy.com` to `media4.giphy.com` is

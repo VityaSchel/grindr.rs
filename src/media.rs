@@ -30,7 +30,7 @@ pub(crate) const MEDIA_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) const MEDIA_BODY_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_REDIRECTS: usize = 5;
 
-/// Which of the app's two HTTP stacks a fetch imitates.
+/// Which of the app's HTTP stacks a fetch imitates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MediaFetcher {
 	/// The image loader, used for photos and chat images.
@@ -38,6 +38,8 @@ pub enum MediaFetcher {
 	ImageLoader,
 	/// `android.media.MediaPlayer`, used for album video.
 	MediaPlayer,
+	/// A plain OkHttp client sending only its default headers.
+	Plain,
 }
 
 /// Argument of [`GrindrClient::fetch_media`](crate::GrindrClient::fetch_media).
@@ -146,6 +148,7 @@ impl InnerClient {
 			MediaFetcher::MediaPlayer => {
 				GrindrHeaders::build_platform_media(&fp.device, target.range)?
 			}
+			MediaFetcher::Plain => GrindrHeaders::build_plain(target.range)?,
 		};
 
 		let mut request = fp.media_http.request(Method::GET, url);

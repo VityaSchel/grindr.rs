@@ -195,6 +195,35 @@ fn the_bare_cdn_apex_is_not_a_distribution() {
 	assert!(!is_media_host(&parsed("https://cloudfront.net/x")));
 }
 
+#[test]
+fn admits_the_giphy_media_and_api_hosts() {
+	for url in [
+		"https://media.giphy.com/x.gif",
+		"https://media0.giphy.com/x.webp",
+		"https://media1.giphy.com/x.mp4",
+		"https://media2.giphy.com/x",
+		"https://media3.giphy.com/x",
+		"https://media4.giphy.com/x",
+		"https://api.giphy.com/x",
+	] {
+		assert!(is_media_host(&parsed(url)), "{url} must be admitted");
+	}
+}
+
+#[test]
+fn refuses_giphy_look_alikes() {
+	for url in [
+		"https://giphy.com/gifs/x",
+		"https://upload.giphy.com/v1/gifs",
+		"https://media5.giphy.com/x",
+		"https://media.giphy.com.evil.test/x",
+		"https://evilmedia.giphy.com/x",
+		"http://media.giphy.com/x",
+	] {
+		assert!(!is_media_host(&parsed(url)), "{url} must be refused");
+	}
+}
+
 #[tokio::test]
 async fn a_media_fetch_carries_no_credentials_even_with_a_session() {
 	let url = media_url(11);

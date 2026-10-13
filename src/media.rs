@@ -43,7 +43,7 @@ pub enum MediaFetcher {
 /// Argument of [`GrindrClient::fetch_media`](crate::GrindrClient::fetch_media).
 #[derive(Debug, Clone, Copy)]
 pub struct MediaRequest<'a> {
-	/// Absolute `https` url on a Grindr CDN.
+	/// Absolute `https` url on a Grindr CDN or a GIPHY host.
 	pub url: &'a str,
 	/// `Range` header value, forwarded verbatim.
 	pub range: Option<&'a str>,
@@ -68,8 +68,20 @@ pub struct MediaResponse {
 	pub body: Bytes,
 }
 
+const GIPHY_HOSTS: [&str; 7] = [
+	"api.giphy.com",
+	"media.giphy.com",
+	"media0.giphy.com",
+	"media1.giphy.com",
+	"media2.giphy.com",
+	"media3.giphy.com",
+	"media4.giphy.com",
+];
+
 fn is_cdn_host(host: &str) -> bool {
-	host == "cdns.grindr.com" || host.ends_with(".cloudfront.net")
+	host == "cdns.grindr.com"
+		|| host.ends_with(".cloudfront.net")
+		|| GIPHY_HOSTS.contains(&host)
 }
 
 fn is_media_host(url: &Url) -> bool {
@@ -120,7 +132,7 @@ impl InnerClient {
 		})?;
 		if !is_allowed(&url) {
 			return Err(GrindrError::InvalidRequest(format!(
-				"media url is not on a Grindr CDN: {:?}",
+				"media url is not on an allowed host: {:?}",
 				target.url
 			)));
 		}

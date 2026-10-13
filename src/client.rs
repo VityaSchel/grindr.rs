@@ -619,17 +619,19 @@ impl GrindrClient {
 		self.inner.ensure_device_key(&self.auth).await
 	}
 
-	/// Fetches a CDN file with the API's fingerprint on a pool of its own, with
-	/// the headers the app's image loader sends.
+	/// Fetches a media file with the API's fingerprint on a pool of its own,
+	/// with the headers the app's image loader sends.
 	///
-	/// Only `https` on `cdns.grindr.com` or `*.cloudfront.net` is accepted,
-	/// redirects included; anything else is [`GrindrError::InvalidRequest`]
-	/// before a socket is opened. The headers must arrive within 20 s and the
-	/// body within 120 s, with a read timeout between two pieces. If the
-	/// headers are late, the request went out on an already-open connection,
-	/// and nothing else arrived from that host while it waited, the connection
-	/// is assumed dead and the request is sent once more on a new one. A
-	/// non-success status comes back as an ordinary [`MediaResponse`].
+	/// Only `https` on `cdns.grindr.com`, `*.cloudfront.net`, `api.giphy.com`,
+	/// `media.giphy.com` or `media0.giphy.com` to `media4.giphy.com` is
+	/// accepted, redirects included; anything else is
+	/// [`GrindrError::InvalidRequest`] before a socket is opened. The headers
+	/// must arrive within 20 s and the body within 120 s, with a read timeout
+	/// between two pieces. If the headers are late, the request went out on an
+	/// already-open connection, and nothing else arrived from that host while
+	/// it waited, the connection is assumed dead and the request is sent once
+	/// more on a new one. A non-success status comes back as an ordinary
+	/// [`MediaResponse`].
 	pub async fn fetch_media(
 		&self,
 		request: MediaRequest<'_>,
@@ -637,7 +639,7 @@ impl GrindrClient {
 		self.inner.fetch_media(request).await
 	}
 
-	/// Opens a CDN file as a stream, with the same transport, headers and host
+	/// Opens a media file as a stream, with the same transport, headers and host
 	/// rules as [`fetch_media`](Self::fetch_media).
 	///
 	/// The headers must arrive within 20 s; the body has no total deadline,

@@ -1186,6 +1186,37 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn a_refused_client_version_is_not_refreshed_again() {
+		let device = DeviceInfo::generate();
+		let device_id = device.device_id.clone();
+		crate::testserver::queue_replies(crate::testserver::QueuedReplies {
+			device_id: &device_id,
+			path: "/v8/sessions",
+			replies: vec![
+				(
+					"412 Precondition Failed",
+					r#"{"code":8,"message":"The client version is deprecated"}"#
+						.to_owned(),
+				);
+				2
+			],
+		});
+		let client =
+			GrindrClient::new(device, Some(expired_session())).unwrap();
+
+		let _ = client.request(Method::GET, "/v3/bootstrap").send().await;
+		client.set_active(false);
+		client.set_active(true);
+		let _ = client.request(Method::GET, "/v3/bootstrap").send().await;
+
+		let refreshes = crate::testserver::requests_from(&device_id)
+			.iter()
+			.filter(|r| r.path == "/v8/sessions")
+			.count();
+		assert_eq!(refreshes, 1);
+	}
+
+	#[tokio::test]
 	async fn a_burst_of_calls_on_a_dead_network_refreshes_once() {
 		let device = DeviceInfo::generate();
 		let device_id = device.device_id.clone();

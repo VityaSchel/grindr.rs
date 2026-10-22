@@ -139,7 +139,7 @@ pub enum VerificationRegion {
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct BanDetails {
-	/// Unix seconds when the ban expires.
+	/// Unix milliseconds when the ban expires.
 	pub expiry_time: Option<i64>,
 	/// Ban reason.
 	pub reason: Option<String>,

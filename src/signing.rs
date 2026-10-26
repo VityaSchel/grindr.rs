@@ -230,6 +230,95 @@ mod tests {
 		assert!(verifying.verify(message.as_bytes(), &signature).is_ok());
 	}
 
+	const VECTOR_SECRET: [u8; 32] = [
+		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+		0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+		0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+	];
+	const VECTOR_USER_ID: &str = "123456789";
+	const VECTOR_ANDROID_ID: &str = "0011223344556677";
+	const VECTOR_STORED: &str = r#"{"key":"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA","user_id":"123456789"}"#;
+	const VECTOR_PUBLIC_KEY: &str = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEUVw9brnjlrkE0_7Kf1T9zQzB6Ze_N13KUVrQpsO0A19FNr46UPMY-_mlR1kCoiFQK-8NV-CMU7LMClbxfZ-TVA";
+	const VECTOR_KEY_ID: &str = "8dWUSbcnFl3nMr8oMzgSK5liimFZGP7cZ9h4__z0fac";
+
+	fn vector_key() -> DeviceKey {
+		let stored = serde_json::from_str(VECTOR_STORED).unwrap();
+		DeviceKey::from_stored(&stored).unwrap()
+	}
+
+	#[test]
+	fn the_vector_key_round_trips_through_storage() {
+		let stored: DeviceSigningKey =
+			serde_json::from_str(VECTOR_STORED).unwrap();
+		assert_eq!(URL_SAFE_NO_PAD.decode(&stored.key).unwrap(), VECTOR_SECRET);
+		assert_eq!(stored.user_id(), VECTOR_USER_ID);
+
+		let exported = DeviceKey::from_stored(&stored).unwrap().export();
+		assert_eq!(serde_json::to_string(&exported).unwrap(), VECTOR_STORED);
+	}
+
+	#[test]
+	fn the_vector_key_keeps_its_public_key_and_key_id() {
+		let key = vector_key();
+		assert_eq!(key.public_key(), VECTOR_PUBLIC_KEY);
+		assert_eq!(key.key_id(), VECTOR_KEY_ID);
+		assert_eq!(key.user_id(), VECTOR_USER_ID);
+	}
+
+	#[test]
+	fn the_vector_key_keeps_its_registration_signatures() {
+		let key = vector_key();
+		assert_eq!(
+			key.registration_signature(VECTOR_ANDROID_ID, "challenge-one"),
+			"MEYCIQCoeQXuIRqcgkuFgLqonZx3ediExOmJvRXVc59I-vxXfgIhAKPUrtY8dUNbtP_q1ceQ9wkwtDqdThbvMx0pL4tUKY_W"
+		);
+		assert_eq!(
+			key.registration_signature("abcdef0123456789", "c2"),
+			"MEUCIECagis9ytoaqLKoaT1HdojzeAbk-1GcYOBYegiMmfa6AiEA6uNZNu0OJfhSJOeBFuTeU-QUv3fyMpAHXrPxFK5EO-E"
+		);
+	}
+
+	#[test]
+	fn the_vector_key_keeps_its_upload_signature() {
+		let key = vector_key();
+		let body = b"jpeg-bytes";
+		let body_hash = b64url(Sha256::digest(body));
+		let message = |nonce: &str| {
+			format!(
+				"{body_hash}|1700000000000|{VECTOR_USER_ID}|{VECTOR_ANDROID_ID}|{nonce}"
+			)
+		};
+		assert_eq!(
+			key.sign(&message(&b64url([7u8; 32]))),
+			"MEUCIQDSLfqhlqKWFEt9Ls-lEA2XnRMYS5B27IVyMq9qFG-sIwIgJL7e9jFYO5nccP_yvwgYKQNUwfTUxmCytGt2IJ7vov8"
+		);
+
+		let headers =
+			key.upload_headers(VECTOR_ANDROID_ID, body, 1_700_000_000_000);
+		assert_eq!(headers.key_id, VECTOR_KEY_ID);
+		assert_eq!(headers.timestamp, 1_700_000_000_000);
+		assert_eq!(URL_SAFE_NO_PAD.decode(&headers.nonce).unwrap().len(), 32);
+		assert_eq!(headers.signature, key.sign(&message(&headers.nonce)));
+	}
+
+	#[test]
+	fn malformed_stored_keys_are_refused() {
+		let keys = [
+			b64url([0u8; 32]),
+			b64url([0xffu8; 32]),
+			b64url(&VECTOR_SECRET[..31]),
+			b64url([VECTOR_SECRET.as_slice(), &[0x21]].concat()),
+			"not base64!".to_owned(),
+		];
+		for key in keys {
+			let stored = DeviceSigningKey {
+				key: key.clone(),
+				user_id: VECTOR_USER_ID.to_owned(),
+			};
+			assert!(DeviceKey::from_stored(&stored).is_none(), "{key}");
+		}
+	}
+
 	#[test]
 	fn detects_retryable_and_fatal_rejections() {
 		assert!(matches!(

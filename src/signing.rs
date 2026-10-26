@@ -2,7 +2,8 @@ use std::fmt;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use p256::ecdsa::{signature::Signer, Signature, SigningKey};
-use rand_core::{OsRng, RngCore};
+use p256::elliptic_curve::Generate;
+use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use spki::EncodePublicKey;
@@ -22,18 +23,15 @@ pub(crate) struct DeviceKey {
 impl DeviceKey {
 	pub fn generate(user_id: String) -> Self {
 		Self::from_key(
-			SigningKey::from(&p256::SecretKey::random(&mut OsRng)),
+			SigningKey::generate_from_rng(&mut UnwrapErr(SysRng)),
 			user_id,
 		)
 	}
 
 	pub fn from_stored(stored: &DeviceSigningKey) -> Option<Self> {
 		let bytes = URL_SAFE_NO_PAD.decode(&stored.key).ok()?;
-		if bytes.len() != 32 {
-			return None;
-		}
-		let key = SigningKey::from_bytes(p256::FieldBytes::from_slice(&bytes))
-			.ok()?;
+		let bytes = <&p256::FieldBytes>::try_from(bytes.as_slice()).ok()?;
+		let key = SigningKey::from_bytes(bytes).ok()?;
 		Some(Self::from_key(key, stored.user_id.clone()))
 	}
 
@@ -92,7 +90,7 @@ impl DeviceKey {
 		timestamp: u64,
 	) -> UploadSignature {
 		let mut nonce = [0u8; 32];
-		OsRng.fill_bytes(&mut nonce);
+		UnwrapErr(SysRng).fill_bytes(&mut nonce);
 		let nonce = b64url(nonce);
 		let body_hash = b64url(Sha256::digest(body));
 		let signature = self.sign(&format!(
@@ -299,6 +297,21 @@ mod tests {
 		assert_eq!(headers.timestamp, 1_700_000_000_000);
 		assert_eq!(URL_SAFE_NO_PAD.decode(&headers.nonce).unwrap().len(), 32);
 		assert_eq!(headers.signature, key.sign(&message(&headers.nonce)));
+	}
+
+	#[test]
+	fn generated_keys_and_upload_nonces_differ_each_time() {
+		assert_ne!(
+			DeviceKey::generate("1".into()).export().key,
+			DeviceKey::generate("1".into()).export().key
+		);
+		let key = vector_key();
+		assert_ne!(
+			key.upload_headers(VECTOR_ANDROID_ID, b"jpeg-bytes", 1)
+				.nonce,
+			key.upload_headers(VECTOR_ANDROID_ID, b"jpeg-bytes", 1)
+				.nonce
+		);
 	}
 
 	#[test]

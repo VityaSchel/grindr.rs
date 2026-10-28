@@ -706,6 +706,7 @@ dependencies = [
  "tower-service",
  "tracing",
  "uuid",
+ "webpki-root-certs 1.0.11",
  "wreq",
 ]
 

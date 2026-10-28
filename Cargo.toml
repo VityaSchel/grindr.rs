@@ -26,6 +26,7 @@ exclude = [
 
 [dependencies]
 wreq = { version = "0.15", features = ["gzip", "json", "websocket"] }
+webpki-root-certs = "1.0.10"
 bytes = "1"
 http-body = "1"
 http2 = "0.4"
